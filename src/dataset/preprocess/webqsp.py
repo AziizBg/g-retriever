@@ -185,6 +185,6 @@ def step_two():
     print(f"\nCompleted! Processed: {processed}, Skipped: {skipped}, Error: {SAMPLE_SIZE - processed - skipped}")
 
 if __name__ == '__main__':
-    step_one()
-    step_two()
+    # step_one()
+    # step_two()
     generate_split()
