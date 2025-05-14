@@ -13,6 +13,8 @@ path_nodes = f'{path}/nodes'
 path_edges = f'{path}/edges'
 path_graphs = f'{path}/graphs'
 data_dir = '/content/g-retriever/RoG-webqsp/data'
+drive_path = '/content/drive/MyDrive/Projets TPs GL4/PFA GL4/webqsp'  # or your desired persistent directory
+
 
 def load_parquet_dataset(data_dir):
     """
@@ -46,21 +48,18 @@ def load_parquet_dataset(data_dir):
     return dataset
 
 def step_one():
-    """
-    Processes the WebQSP dataset to extract graph structures for each sample.
-    For each sample, creates two CSV files:
-        - nodes: mapping node IDs to node attributes (entity names)
-        - edges: mapping source node, edge attribute (relation), and destination node
-
-    The CSV files are saved in the directories specified by path_nodes and path_edges.
-    """
     dataset = load_parquet_dataset(data_dir)
     dataset = concatenate_datasets([dataset['train'], dataset['validation'], dataset['test']])
 
     os.makedirs(path_nodes, exist_ok=True)
     os.makedirs(path_edges, exist_ok=True)
+    os.makedirs(os.path.join(drive_path, path_nodes), exist_ok=True)
+    os.makedirs(os.path.join(drive_path, path_edges), exist_ok=True)
+    
+    SUBSAMPLE = True
+    SAMPLE_SIZE = 50 if SUBSAMPLE else len(dataset)
 
-    for i in tqdm(range(len(dataset))):
+    for i in tqdm(range(SAMPLE_SIZE)):
         nodes = {}
         edges = []
         for tri in dataset[i]['graph']:
@@ -72,42 +71,59 @@ def step_one():
             if t not in nodes:
                 nodes[t] = len(nodes)
             edges.append({'src': nodes[h], 'edge_attr': r, 'dst': nodes[t]})
-        nodes = pd.DataFrame([{'node_id': v, 'node_attr': k} for k, v in nodes.items()], columns=['node_id', 'node_attr'])
-        edges = pd.DataFrame(edges, columns=['src', 'edge_attr', 'dst'])
+        nodes_df = pd.DataFrame([{'node_id': v, 'node_attr': k} for k, v in nodes.items()], columns=['node_id', 'node_attr'])
+        edges_df = pd.DataFrame(edges, columns=['src', 'edge_attr', 'dst'])
 
-        nodes.to_csv(f'{path_nodes}/{i}.csv', index=False)
-        edges.to_csv(f'{path_edges}/{i}.csv', index=False)
+        nodes_df.to_csv(f'{path_nodes}/{i}.csv', index=False)
+        edges_df.to_csv(f'{path_edges}/{i}.csv', index=False)
+
+        nodes_df.to_csv(os.path.join(drive_path, f'{path_nodes}/{i}.csv'), index=False)
+        edges_df.to_csv(os.path.join(drive_path, f'{path_edges}/{i}.csv'), index=False)
+
+
 
 def generate_split():
     """
-    Generates and saves the train/validation/test split indices for the dataset.
+    Generates and saves balanced train/validation/test split indices for the first SAMPLE_SIZE samples.
     The indices are saved as text files in the split directory.
-    Handles offsetting indices for validation and test splits to match concatenated dataset order.
-    Removes known empty graph indices from validation.
     """
-    dataset = load_parquet_dataset(data_dir)
+    SAMPLE_SIZE = 50  # Must match your preprocessing sample size
 
-    train_indices = np.arange(len(dataset['train']))
-    val_indices = np.arange(len(dataset['validation'])) + len(dataset['train'])
-    test_indices = np.arange(len(dataset['test'])) + len(dataset['train']) + len(dataset['validation'])
+    # Example: 80% train, 10% val, 10% test
+    train_end = int(0.8 * SAMPLE_SIZE)
+    val_end = int(0.9 * SAMPLE_SIZE)
 
-    # Remove empty graph indices
-    val_indices = [i for i in val_indices if i != 2937]
+    indices = list(range(SAMPLE_SIZE))
+    train_indices = indices[:train_end]
+    val_indices = indices[train_end:val_end]
+    test_indices = indices[val_end:]
 
     print("# train samples: ", len(train_indices))
     print("# val samples: ", len(val_indices))
     print("# test samples: ", len(test_indices))
 
     os.makedirs(f'{path}/split', exist_ok=True)
+    # create the same directory in Google Drive if not already present
+    drive_graph_dir = os.path.join(drive_path, f'{path}/split')
+    if not os.path.exists(drive_graph_dir):
+        os.makedirs(drive_graph_dir)
 
+    os.makedirs(drive_graph_dir, exist_ok=True)
     with open(f'{path}/split/train_indices.txt', 'w') as file:
+        file.write('\n'.join(map(str, train_indices)))
+    with open(os.path.join(drive_path, f'{path}/split/train_indices.txt'), 'w') as file:
         file.write('\n'.join(map(str, train_indices)))
 
     with open(f'{path}/split/val_indices.txt', 'w') as file:
         file.write('\n'.join(map(str, val_indices)))
+    with open(os.path.join(drive_path, f'{path}/split/val_indices.txt'), 'w') as file:
+        file.write('\n'.join(map(str, val_indices)))
 
     with open(f'{path}/split/test_indices.txt', 'w') as file:
         file.write('\n'.join(map(str, test_indices)))
+    with open(os.path.join(drive_path, f'{path}/split/test_indices.txt'), 'w') as file:
+        file.write('\n'.join(map(str, test_indices)))
+
 
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -126,8 +142,8 @@ def step_two():
     
     # Configuration
     MAX_NODES = 1000  # Skip very large graphs
-    SUBSAMPLE = False  # Set to True if you want to process only a subset
-    SAMPLE_SIZE = 1000 if SUBSAMPLE else total_graphs
+    SUBSAMPLE = True  # Set to True if you want to process only a subset
+    SAMPLE_SIZE = 50 if SUBSAMPLE else total_graphs
 
     questions = [i['question'] for i in dataset]
 
@@ -147,6 +163,11 @@ def step_two():
     q_embs = torch.cat(q_embs)
     torch.save(q_embs, f'{path}/q_embs.pt')
 
+    # Save q_embs to Google Drive
+    drive_q_embs_path = os.path.join(drive_path, path, 'q_embs.pt')
+    os.makedirs(os.path.dirname(drive_q_embs_path), exist_ok=True)
+    torch.save(q_embs, drive_q_embs_path)
+
     print(f'Encoding graphs (processing {SAMPLE_SIZE} of {total_graphs})...')
     os.makedirs(path_graphs, exist_ok=True)
 
@@ -158,11 +179,11 @@ def step_two():
             nodes.node_attr = nodes.node_attr.fillna("")
 
             # Skip large graphs
-            if len(nodes) > MAX_NODES:
-                skipped += 1
-                progress_bar.set_postfix({'skipped': skipped, 'last_size': len(nodes)})
-                progress_bar.update(1)
-                continue
+            # if len(nodes) > MAX_NODES:
+            #     skipped += 1
+            #     progress_bar.set_postfix({'skipped': skipped, 'last_size': len(nodes)})
+            #     progress_bar.update(1)
+            #     continue
 
             # Process graph
             with torch.no_grad(), torch.cuda.amp.autocast():
@@ -172,7 +193,9 @@ def step_two():
             edge_index = torch.LongTensor([edges.src.tolist(), edges.dst.tolist()])
             pyg_graph = Data(x=x, edge_index=edge_index, edge_attr=edge_attr, num_nodes=len(nodes))
             torch.save(pyg_graph, f'{path_graphs}/{index}.pt')
-            
+            drive_graph_dir = os.path.join(drive_path, path_graphs)
+            os.makedirs(drive_graph_dir, exist_ok=True)
+            torch.save(pyg_graph, os.path.join(drive_graph_dir, f'{index}.pt'))
             processed += 1
             progress_bar.set_postfix({'processed': processed, 'skipped': skipped})
             progress_bar.update(1)
@@ -185,6 +208,6 @@ def step_two():
     print(f"\nCompleted! Processed: {processed}, Skipped: {skipped}, Error: {SAMPLE_SIZE - processed - skipped}")
 
 if __name__ == '__main__':
-    # step_one()
-    # step_two()
+    step_one()
+    step_two()
     generate_split()

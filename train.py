@@ -1,199 +1,178 @@
 import os
-import wandb
-import gc
-from tqdm import tqdm
 import torch
 import pandas as pd
-from torch.utils.data import DataLoader
-from openai import OpenAI
-from src.config import parse_args_llama
-from src.dataset import load_dataset
-from src.utils.evaluate import eval_funcs
-from src.utils.collate import collate_fn
-from src.utils.seed import seed_everything
+from tqdm import tqdm
+from torch.utils.data import Dataset, DataLoader
+import torch.nn as nn
+import torch.optim as optim
+import numpy as np
+from transformers import AutoTokenizer, AutoModel
+import torch.nn.functional as F
 
-# Initialize NVIDIA client
-client = OpenAI(
-    base_url="https://integrate.api.nvidia.com/v1",
-    api_key="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"
-)
+# Example simple classifier
+class SimpleClassifier(nn.Module):
+    def __init__(self, input_dim, hidden_dim=128, num_classes=2):
+        super().__init__()
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.relu = nn.ReLU()
+        self.fc2 = nn.Linear(hidden_dim, num_classes)
+    def forward(self, x):
+        x = self.fc1(x)
+        x = self.relu(x)
+        x = self.fc2(x)
+        return x
 
-class NvidiaModelWrapper:
-    """
-    Wrapper for the NVIDIA Llama API model.
+# Custom Dataset
+class WebQSPDataset(Dataset):
+    def __init__(self, q_embs, labels):
+        self.q_embs = q_embs
+        self.labels = labels
+    def __len__(self):
+        return len(self.q_embs)
+    def __getitem__(self, idx):
+        return self.q_embs[idx], self.labels[idx]
 
-    Handles inference by sending batches of questions to the NVIDIA API and formatting
-    the results for downstream evaluation.
+def load_labels(indices, dataset):
+    labels = []
+    for i in indices:
+        ans = dataset.iloc[i]['answer']
+        # Handle numpy array case
+        if isinstance(ans, np.ndarray):
+            ans = '|'.join(ans.astype(str))  # Convert array elements to strings and join
+        # Handle list case
+        elif isinstance(ans, list):
+            ans = '|'.join(map(str, ans))  # Convert list elements to strings and join
+        # Handle other cases (should be string)
+        else:
+            ans = str(ans)
+        label = 1 if 'support' in ans.lower() else 0
+        labels.append(label)
+    return torch.tensor(labels, dtype=torch.long)
 
-    Attributes:
-        args: Arguments containing model and inference configuration.
-        temperature (float): Sampling temperature for the API.
-        max_tokens (int): Maximum number of tokens to generate per response.
-    """
-    def __init__(self, args):
-        """
-        Initializes the NvidiaModelWrapper.
+def main():
+    # --- Load embeddings and dataset ---
+    path = 'dataset/webqsp'
+    q_embs = torch.load(f'{path}/q_embs.pt')  # shape: [N, D]
+    # Load your dataset as before (e.g. with load_parquet_dataset)
+    from src.dataset.preprocess.webqsp import load_parquet_dataset
+    data_dir = '/content/g-retriever/RoG-webqsp/data'
+    dataset_dict = load_parquet_dataset(data_dir)
+    dataset = pd.concat([dataset_dict['train'].to_pandas(), 
+                         dataset_dict['validation'].to_pandas(), 
+                         dataset_dict['test'].to_pandas()], ignore_index=True)
 
-        Args:
-            args: Namespace or dict containing model configuration, including max_new_tokens.
-        """
-        self.args = args
-        self.temperature = 0.1
-        self.max_tokens = args.max_new_tokens
-        
-    def inference(self, batch):
-        """
-        Performs inference on a batch of questions using the NVIDIA API.
+    # --- Load split indices ---
+    with open(f'{path}/split/train_indices.txt') as f:
+        train_idx = [int(x) for x in f]
+    with open(f'{path}/split/val_indices.txt') as f:
+        val_idx = [int(x) for x in f]
+    with open(f'{path}/split/test_indices.txt') as f:
+        test_idx = [int(x) for x in f]
 
-        Args:
-            batch (dict): Dictionary with 'question' and 'label' lists.
+    # --- Prepare datasets ---
+    train_labels = load_labels(train_idx, dataset)
+    val_labels = load_labels(val_idx, dataset)
+    test_labels = load_labels(test_idx, dataset)
 
-        Returns:
-            list: List of dicts with 'pred' (prediction) and 'label' for each sample.
-        """
-        results = []
-        for question, label in zip(batch['question'], batch['label']):
-            messages = [{
-                "role": "system",
-                "content": "Analyze if these arguments support or counter each other. Respond with only 'support' or 'counter'."
-            }, {
-                "role": "user",
-                "content": question
-            }]
-            
-            try:
-                completion = client.chat.completions.create(
-                    model="nvidia/llama-3.1-nemotron-ultra-253b-v1",
-                    messages=messages,
-                    temperature=self.temperature,
-                    max_tokens=self.max_tokens,
-                    stream=False
-                )
-                
-                output = completion.choices[0].message.content.lower().strip()
-                pred = 'support' if 'support' in output else 'counter'
-                
-                results.append({
-                    "pred": pred,
-                    "label": label
-                })
-                
-            except Exception as e:
-                print(f"API Error: {e}")
-                results.append({
-                    "pred": "error",
-                    "label": label
-                })
-        return results
+    train_set = WebQSPDataset(q_embs[train_idx], train_labels)
+    val_set = WebQSPDataset(q_embs[val_idx], val_labels)
+    test_set = WebQSPDataset(q_embs[test_idx], test_labels)
 
-def main(args):
-    """
-    Main training and evaluation loop for the NVIDIA Llama API model.
+    train_loader = DataLoader(train_set, batch_size=32, shuffle=True)
+    val_loader = DataLoader(val_set, batch_size=32)
+    test_loader = DataLoader(test_set, batch_size=32)
 
-    Handles:
-        - Seeding and experiment tracking initialization.
-        - Dataset loading and split.
-        - DataLoader creation for validation and test sets.
-        - Model wrapper initialization.
-        - Validation loop with early stopping.
-        - Final test evaluation and result saving.
+    # --- Model, Loss, Optimizer ---
+    input_dim = q_embs.shape[1]
+    model = SimpleClassifier(input_dim)
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=1e-3)
 
-    Args:
-        args: Namespace or dict with experiment configuration.
-    """
-    # Initialize wandb
-    seed_everything(seed=args.seed)
-    wandb.init(project=f"{args.project}",
-               name=f"{args.dataset}_nvidia_llama_seed{args.seed}",
-               config=args)
-    print(args)
-
-    # Load dataset
-    dataset = load_dataset[args.dataset]()
-    idx_split = dataset.get_idx_split()
-    
-    # Filter out None samples to avoid AttributeError in collate_fn
-    val_data = [dataset[i] for i in idx_split['val'] if dataset[i] is not None]
-    test_data = [dataset[i] for i in idx_split['test'] if dataset[i] is not None]
-
-    # Create data loaders
-    val_loader = DataLoader(
-        val_data,
-        batch_size=args.eval_batch_size,
-        collate_fn=collate_fn,
-        shuffle=False
-    )
-    test_loader = DataLoader(
-        test_data,
-        batch_size=args.eval_batch_size,
-        collate_fn=collate_fn,
-        shuffle=False
-    )
-
-    # Initialize model wrapper
-    model = NvidiaModelWrapper(args)
-
-    # Validation phase (replaces training for API model)
-    best_val_acc = 0.0
-    best_epoch = 0
-    
-        
-    for epoch in range(args.num_epochs):
-        val_results = []
-        
-        for batch in tqdm(val_loader, desc=f"Epoch {epoch+1}/{args.num_epochs}"):
-            batch_results = model.inference(batch)
-            val_results.extend(batch_results)
-        
-        # Check for empty val_results to avoid ZeroDivisionError
-        if len(val_results) == 0:
-            print("Warning: No validation results for this epoch. Skipping validation accuracy calculation.")
-            continue
-
-        val_acc = sum(1 for r in val_results if r['pred'] == r['label']) / len(val_results)
-        wandb.log({'Val Acc': val_acc, 'epoch': epoch})
-        print(f"Epoch {epoch}: Val Acc {val_acc:.4f}")
-
-        # Early stopping logic
+    # --- Training Loop ---
+    best_val_acc = 0
+    for epoch in range(10):
+        model.train()
+        for xb, yb in train_loader:
+            optimizer.zero_grad()
+            out = model(xb)
+            loss = criterion(out, yb)
+            loss.backward()
+            optimizer.step()
+        # Validation
+        model.eval()
+        correct = total = 0
+        with torch.no_grad():
+            for xb, yb in val_loader:
+                out = model(xb)
+                pred = out.argmax(dim=1)
+                correct += (pred == yb).sum().item()
+                total += yb.size(0)
+        val_acc = correct / total
+        print(f"Epoch {epoch+1}: Val Acc {val_acc:.4f}")
         if val_acc > best_val_acc:
             best_val_acc = val_acc
-            best_epoch = epoch
-            print(f"New best validation accuracy: {val_acc:.4f}")
+            torch.save(model.state_dict(), f"{path}/best_model.pt")
+            print("Saved new best model.")
+            # --- Also save to Google Drive for persistence ---
+            drive_path = '/content/drive/MyDrive/Projets TPs GL4/PFA GL4/webqsp'
+            drive_model_dir = os.path.join(drive_path, path)
+            os.makedirs(drive_model_dir, exist_ok=True)
+            torch.save(model.state_dict(), os.path.join(drive_model_dir, "best_model.pt"))
 
-        if epoch - best_epoch >= args.patience:
-            print(f'Early stopping at epoch {epoch}')
+    # --- Test ---
+    model.load_state_dict(torch.load(f"{path}/best_model.pt"))
+    model.eval()
+    correct = total = 0
+    with torch.no_grad():
+        for xb, yb in test_loader:
+            out = model(xb)
+            pred = out.argmax(dim=1)
+            correct += (pred == yb).sum().item()
+            total += yb.size(0)
+    test_acc = correct / total
+    print(f"Test Accuracy: {test_acc:.4f}")
+    # --- Save test results to Google Drive ---
+    test_results_path = f"{path}/test_results.txt"
+    with open(test_results_path, "w") as f:
+        f.write(f"Test Accuracy: {test_acc:.4f}\n")
+    drive_results_dir = os.path.join(drive_path, path)
+    os.makedirs(drive_results_dir, exist_ok=True)
+    with open(os.path.join(drive_results_dir, "test_results.txt"), "w") as f:
+        f.write(f"Test Accuracy: {test_acc:.4f}\n")
+
+from sentence_transformers import SentenceTransformer
+
+def test_with_prompt(model_path, input_dim):
+    # Load the trained classifier
+    model = SimpleClassifier(input_dim)
+    model.load_state_dict(torch.load(model_path))
+    model.eval()
+
+    # Load the same embedding model used for q_embs
+    embed_model = SentenceTransformer('sentence-transformers/all-roberta-large-v1')
+
+    while True:
+        print("\nEnter a question to classify (or 'quit' to exit):")
+        user_input = input().strip()
+        if user_input.lower() == 'quit':
             break
 
-    # Final Evaluation
-    os.makedirs(f'{args.output_dir}/{args.dataset}', exist_ok=True)
-    path = f'{args.output_dir}/{args.dataset}/nvidia_llama_results_seed{args.seed}.csv'
-    
-    test_results = []
-    for batch in tqdm(test_loader, desc="Testing"):
-        batch_results = model.inference(batch)
-        test_results.extend(batch_results)
-    
-    df = pd.DataFrame(test_results)
-    df.to_csv(path, index=False)
-    
-    # Check for empty test_results to avoid ZeroDivisionError
-    if len(test_results) == 0:
-        print("Warning: No test results. Skipping test accuracy calculation.")
-        test_acc = 0.0
-    else:
-        test_acc = sum(1 for r in test_results if r['pred'] == r['label']) / len(test_results)
-        print(f'Final Test Accuracy: {test_acc:.4f}')
-        wandb.log({'Test Acc': test_acc})
-        
-if __name__ == "__main__":
-    """
-    Entry point for running the script.
+        # Generate embedding for the input question
+        question_embedding = embed_model.encode([user_input], convert_to_tensor=True)
+        # Make prediction
+        with torch.no_grad():
+            logits = model(question_embedding)
+            probs = F.softmax(logits, dim=1)
+            pred_class = logits.argmax().item()
+            confidence = probs[0][pred_class].item()
 
-    - Parses command-line arguments.
-    - Runs the main experiment loop.
-    - Frees GPU and CPU memory after completion.
-    """
-    args = parse_args_llama()
-    main(args)
-    torch.cuda.empty_cache()
-    gc.collect()
+        class_name = "SUPPORT" if pred_class == 1 else "NOT SUPPORT"
+        print(f"\nPrediction: {class_name} (confidence: {confidence:.2%})")
+
+if __name__ == "__main__":
+    # main()
+    path = 'dataset/webqsp'
+    q_embs = torch.load(f'{path}/q_embs.pt')
+    input_dim = q_embs.shape[1]
+    model_path = f'{path}/best_model.pt'
+    test_with_prompt(model_path, input_dim)
