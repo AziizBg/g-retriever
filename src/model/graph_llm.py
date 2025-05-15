@@ -31,8 +31,7 @@ class GraphLLM(torch.nn.Module):
 
         print('Loading LLAMA')
         kwargs = {
-            "max_memory": {0: '80GiB', 1: '80GiB'},
-            "device_map": "auto",
+            "max_memory": {0: '80GiB'},
             "revision": "main",
         }
 
@@ -42,8 +41,10 @@ class GraphLLM(torch.nn.Module):
 
         model = AutoModelForCausalLM.from_pretrained(
             args.llm_model_path,
+            device_map="auto",
             torch_dtype=torch.float16,
             low_cpu_mem_usage=True,
+            use_cache=False,  # Disable cache to save memory
             **kwargs
         )
 
@@ -74,6 +75,9 @@ class GraphLLM(torch.nn.Module):
         self.model = model
         print('Finish loading LLAMA!')
 
+        self.word_embedding = self.model.model.get_input_embeddings()
+        llm_embed_dim = self.word_embedding.embedding_dim  # Get LLM embedding size dynamically
+
         self.graph_encoder = load_gnn_model[args.gnn_model_name](
             in_channels=args.gnn_in_dim,
             out_channels=args.gnn_hidden_dim,
@@ -83,19 +87,19 @@ class GraphLLM(torch.nn.Module):
             num_heads=args.gnn_num_heads,
         ).to(self.model.device)
 
+
         self.projector = nn.Sequential(
             nn.Linear(args.gnn_hidden_dim, 2048),
             nn.Sigmoid(),
-            nn.Linear(2048, 4096),
+            nn.Linear(2048, llm_embed_dim),
         ).to(self.model.device)
 
-        self.word_embedding = self.model.model.get_input_embeddings()
 
     @property
     def device(self):
         return list(self.parameters())[0].device
 
-    def maybe_autocast(self, dtype=torch.bfloat16):
+    def maybe_autocast(self, dtype=torch.float16):  # <-- change default to float16
         # if on cpu, don't use autocast
         # if on gpu, use autocast with dtype if provided, otherwise use torch.float16
         enable_autocast = self.device != torch.device("cpu")
@@ -104,7 +108,6 @@ class GraphLLM(torch.nn.Module):
             return torch.cuda.amp.autocast(dtype=dtype)
         else:
             return contextlib.nullcontext()
-
     def encode_graphs(self, samples):
         graphs = samples['graph']
         graphs = graphs.to(self.model.device)
@@ -125,12 +128,18 @@ class GraphLLM(torch.nn.Module):
         # encode special tokens
         eos_tokens = self.tokenizer(EOS, add_special_tokens=False)
         eos_user_tokens = self.tokenizer(EOS_USER, add_special_tokens=False)
-        bos_embeds = self.word_embedding(self.tokenizer(BOS, add_special_tokens=False, return_tensors='pt').input_ids[0])
-        pad_embeds = self.word_embedding(torch.tensor(self.tokenizer.pad_token_id)).unsqueeze(0)
+        input_ids = self.tokenizer(BOS, add_special_tokens=False, return_tensors='pt').input_ids[0].to(self.word_embedding.weight.device)
+        bos_embeds = self.word_embedding(input_ids)        
+        pad_embeds = self.word_embedding(
+            torch.tensor(self.tokenizer.pad_token_id).to(self.word_embedding.weight.device)
+        ).unsqueeze(0)
 
         # encode graphs
         graph_embeds = self.encode_graphs(samples)
         graph_embeds = self.projector(graph_embeds)
+        print("graph_embeds.shape after projection:", graph_embeds.shape)
+        print("graph_embeds[0].shape after projection:", graph_embeds[0].shape)
+        print("bos_embeds.shape:", bos_embeds.shape)
 
         batch_size = len(samples['id'])
         batch_inputs_embeds = []
@@ -179,7 +188,9 @@ class GraphLLM(torch.nn.Module):
         # encode special tokens
         eos_user_tokens = self.tokenizer(EOS_USER, add_special_tokens=False)
         bos_embeds = self.word_embedding(self.tokenizer(BOS, add_special_tokens=False, return_tensors='pt').input_ids[0])
-        pad_embeds = self.word_embedding(torch.tensor(self.tokenizer.pad_token_id)).unsqueeze(0)
+        pad_embeds = self.word_embedding(
+            torch.tensor(self.tokenizer.pad_token_id).to(self.word_embedding.weight.device)
+        ).unsqueeze(0)
 
         # encode graphs
         graph_embeds = self.encode_graphs(samples)
@@ -189,10 +200,12 @@ class GraphLLM(torch.nn.Module):
         batch_inputs_embeds = []
         batch_attention_mask = []
         for i in range(batch_size):
-            # Add bos & eos token
-            input_ids = descriptions.input_ids[i][:self.max_txt_len] + questions.input_ids[i] + eos_user_tokens.input_ids
+            # STRICTLY TRUNCATE INPUTS
+            max_allowed_desc = self.max_txt_len - len(questions.input_ids[i]) - len(eos_user_tokens.input_ids) - len(label_input_ids)
+            desc_ids = descriptions.input_ids[i][:max_allowed_desc]
+            
+            input_ids = desc_ids + questions.input_ids[i] + eos_user_tokens.input_ids + label_input_ids
             inputs_embeds = self.word_embedding(torch.tensor(input_ids).to(self.model.device))
-            inputs_embeds = torch.cat([bos_embeds, graph_embeds[i].unsqueeze(0), inputs_embeds], dim=0)
             batch_inputs_embeds.append(inputs_embeds)
             batch_attention_mask.append([1] * inputs_embeds.shape[0])
 

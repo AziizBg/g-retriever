@@ -14,7 +14,7 @@ path_edges = f'{path}/edges'
 path_graphs = f'{path}/graphs'
 data_dir = '/content/g-retriever/RoG-webqsp/data'
 drive_path = '/content/drive/MyDrive/Projets TPs GL4/PFA GL4/webqsp'  # or your desired persistent directory
-
+SAMPLE_SIZE=100
 
 def load_parquet_dataset(data_dir):
     """
@@ -57,9 +57,9 @@ def step_one():
     os.makedirs(os.path.join(drive_path, path_edges), exist_ok=True)
     
     SUBSAMPLE = True
-    SAMPLE_SIZE = 50 if SUBSAMPLE else len(dataset)
+    sample_size = SAMPLE_SIZE if SUBSAMPLE else len(dataset)
 
-    for i in tqdm(range(SAMPLE_SIZE)):
+    for i in tqdm(range(sample_size)):
         nodes = {}
         edges = []
         for tri in dataset[i]['graph']:
@@ -87,7 +87,6 @@ def generate_split():
     Generates and saves balanced train/validation/test split indices for the first SAMPLE_SIZE samples.
     The indices are saved as text files in the split directory.
     """
-    SAMPLE_SIZE = 50  # Must match your preprocessing sample size
 
     # Example: 80% train, 10% val, 10% test
     train_end = int(0.8 * SAMPLE_SIZE)
@@ -143,7 +142,7 @@ def step_two():
     # Configuration
     MAX_NODES = 1000  # Skip very large graphs
     SUBSAMPLE = True  # Set to True if you want to process only a subset
-    SAMPLE_SIZE = 50 if SUBSAMPLE else total_graphs
+    sample_size = SAMPLE_SIZE if SUBSAMPLE else total_graphs
 
     questions = [i['question'] for i in dataset]
 
@@ -168,11 +167,11 @@ def step_two():
     os.makedirs(os.path.dirname(drive_q_embs_path), exist_ok=True)
     torch.save(q_embs, drive_q_embs_path)
 
-    print(f'Encoding graphs (processing {SAMPLE_SIZE} of {total_graphs})...')
+    print(f'Encoding graphs (processing {sample_size} of {total_graphs})...')
     os.makedirs(path_graphs, exist_ok=True)
 
-    progress_bar = tqdm(total=SAMPLE_SIZE)
-    for index in range(SAMPLE_SIZE):
+    progress_bar = tqdm(total=sample_size)
+    for index in range(sample_size):
         try:
             nodes = pd.read_csv(f'{path_nodes}/{index}.csv')
             edges = pd.read_csv(f'{path_edges}/{index}.csv')
@@ -205,9 +204,12 @@ def step_two():
             continue
 
     progress_bar.close()
-    print(f"\nCompleted! Processed: {processed}, Skipped: {skipped}, Error: {SAMPLE_SIZE - processed - skipped}")
+    print(f"\nCompleted! Processed: {processed}, Skipped: {skipped}, Error: {sample_size - processed - skipped}")
 
 if __name__ == '__main__':
     step_one()
+    # after step_one() we have the nodes and edges in csv files
     step_two()
+    # after step_two() we have the graphs in pt files
     generate_split()
+    # after step_two() we have the train/val/test split in text files

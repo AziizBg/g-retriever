@@ -22,10 +22,10 @@ cached_desc = os.path.join(path, 'cached_desc')
 split_path = os.path.join(path, 'split')
 
 data_dir = '/content/g-retriever/RoG-webqsp/data'  # <-- peut rester local pour traitement temporaire
-
+SAMPLE_SIZE = 100
 
 class WebQSPDataset(Dataset):
-    def __init__(self, sample_size=50):
+    def __init__(self, sample_size=SAMPLE_SIZE):
         super().__init__()
         self.prompt = 'Please answer the given question.'
         self.graph = None
@@ -44,8 +44,13 @@ class WebQSPDataset(Dataset):
         graph_file = os.path.join(cached_graph, f'{index}.pt')
         desc_file = os.path.join(cached_desc, f'{index}.txt')
         if not os.path.exists(graph_file) or not os.path.exists(desc_file):
-            print(f'Graph file does not exist at index {index}')
-            return None
+            # Try to load the graph and description from google drive
+            graph_file = os.path.join(drive_path, cached_graph, f'{index}.pt')
+            desc_file = os.path.join(drive_path, cached_desc, f'{index}.txt')
+            if not os.path.exists(graph_file) or not os.path.exists(desc_file):
+                # If the files do not exist in both locations, return None
+                print(f'Graph file does not exist at index {index}')
+                return None
         graph = torch.load(graph_file)
         desc = open(desc_file, 'r').read()
         label = ('|').join(data['answer']).lower()
@@ -76,10 +81,10 @@ def preprocess():
     dataset = datasets.concatenate_datasets([dataset['train'], dataset['validation'], dataset['test']])
     skipped = 0
     SUBSAMPLE = True
-    SAMPLE_SIZE = 50 if SUBSAMPLE else len(dataset)
+    sample_size = SAMPLE_SIZE if SUBSAMPLE else len(dataset)
 
     q_embs = torch.load(os.path.join(path, 'q_embs.pt'))
-    for index in range(SAMPLE_SIZE):
+    for index in range(sample_size):
         graph_file = os.path.join(cached_graph, f'{index}.pt')
         desc_file = os.path.join(cached_desc, f'{index}.txt')
 
