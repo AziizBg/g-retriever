@@ -51,7 +51,6 @@ def main(args):
     print('Train Dataset:')
     print(f'Index: {i}')
     print(f'Question: {data["question"]}')
-    print(f'Answer: {data["answer"]}')
     print(f'Graph: {data["graph"]}')
     print(f'Description: {data["desc"]}')
     print('---')
