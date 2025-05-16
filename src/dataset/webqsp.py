@@ -42,7 +42,6 @@ class WebQSPDataset(Dataset):
         print(f'Question: {data["question"]}')
         print(f'Answer: {data["answer"]}')
         print(f'Graph: {data["graph"]}')
-        print(f'Description: {data["desc"]}')
         print('---')    
         # display q_embs in a readable format
         q_emb = self.q_embs[i]
