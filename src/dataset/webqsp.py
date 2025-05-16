@@ -38,15 +38,15 @@ class WebQSPDataset(Dataset):
         # for i in range(sample_size):
         i = 0
         data = self.dataset[i]
-        print(f'Index: {i}')
-        print(f'Question: {data["question"]}')
-        print(f'Answer: {data["answer"]}')
-        print(f'Graph: {data["graph"]}')
-        print('---')    
+        # print(f'Index: {i}')
+        # print(f'Question: {data["question"]}')
+        # print(f'Answer: {data["answer"]}')
+        # print(f'Graph: {data["graph"]}')
+        # print('---')    
         # display q_embs in a readable format
         q_emb = self.q_embs[i]
-        print(f'Q_emb: {q_emb}')
-        print('---')
+        # print(f'Q_emb: {q_emb}')
+        # print('---')
         
 
     def __len__(self):
