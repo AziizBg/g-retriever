@@ -113,6 +113,10 @@ class LLM(torch.nn.Module):
             batch_inputs_embeds.append(inputs_embeds)
             batch_attention_mask.append([1] * inputs_embeds.shape[0])
             label_input_ids = [IGNORE_INDEX] * (inputs_embeds.shape[0]-len(label_input_ids)) + label_input_ids
+            if len(label_input_ids) > inputs_embeds.shape[0]:
+                print("Label length too long")
+                return torch.tensor(float('nan'), device=self.device)
+
             batch_label_input_ids.append(label_input_ids)
 
         # pad inputs_embeds
