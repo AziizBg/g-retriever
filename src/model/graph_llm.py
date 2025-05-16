@@ -1,3 +1,4 @@
+# graph_llm.py
 import contextlib
 import torch
 import torch.nn as nn
@@ -88,11 +89,25 @@ class GraphLLM(torch.nn.Module):
         ).to(self.model.device)
 
 
+        # Replace your projector with this more stable version
         self.projector = nn.Sequential(
             nn.Linear(args.gnn_hidden_dim, 2048),
-            nn.Sigmoid(),
+            nn.LayerNorm(2048),
+            nn.Dropout(0.1),  # Add dropout for regularization
+            nn.GELU(),
             nn.Linear(2048, llm_embed_dim),
+            nn.LayerNorm(llm_embed_dim)  # Final normalization
         ).to(self.model.device)
+
+        # Initialize with smaller weights
+        for layer in self.projector:
+            if isinstance(layer, nn.Linear):
+                nn.init.kaiming_normal_(layer.weight, mode='fan_in', nonlinearity='relu')  # 'gelu' not supported, use 'relu'
+                nn.init.zeros_(layer.bias)
+        
+        # Add gradient clipping hooks
+        for p in self.projector.parameters():
+            p.register_hook(lambda grad: torch.nan_to_num(grad, nan=0.0, posinf=1e4, neginf=-1e4))
 
 
     @property
@@ -108,18 +123,34 @@ class GraphLLM(torch.nn.Module):
             return torch.cuda.amp.autocast(dtype=dtype)
         else:
             return contextlib.nullcontext()
+    
     def encode_graphs(self, samples):
         graphs = samples['graph']
+        # Check for missing or empty graphs
+        if graphs is None or not hasattr(graphs, 'x') or graphs.x is None or graphs.x.numel() == 0:
+            print("Skipping batch due to missing or empty graph data.")
+            return torch.tensor(float('nan'), device=self.device)
+
         graphs = graphs.to(self.model.device)
         n_embeds, _ = self.graph_encoder(graphs.x, graphs.edge_index.long(), graphs.edge_attr)
-
+        # Clamp or replace NaNs/Infs
+        if torch.isnan(n_embeds).any() or torch.isinf(n_embeds).any():
+            print("NaN/Inf in n_embeds from graph_encoder")
+            print("graphs.x:", graphs.x)
+            print("graphs.edge_index:", graphs.edge_index)
+            print("graphs.edge_attr:", graphs.edge_attr)
+            n_embeds = torch.nan_to_num(n_embeds, nan=0.0, posinf=1e4, neginf=-1e4)
         # mean pooling
         g_embeds = scatter(n_embeds, graphs.batch, dim=0, reduce='mean')
-
         return g_embeds
 
     def forward(self, samples):
-
+        # Add input validation
+        for k, v in samples.items():
+            if torch.is_tensor(v):
+                if torch.isnan(v).any() or torch.isinf(v).any():
+                    print(f"NaN/Inf detected in input {k}")
+                    return torch.tensor(float('nan'), device=self.device)
         # encode description, questions and labels
         questions = self.tokenizer(samples["question"], add_special_tokens=False)
         descriptions = self.tokenizer(samples["desc"], add_special_tokens=False)
@@ -129,6 +160,8 @@ class GraphLLM(torch.nn.Module):
         eos_tokens = self.tokenizer(EOS, add_special_tokens=False)
         eos_user_tokens = self.tokenizer(EOS_USER, add_special_tokens=False)
         input_ids = self.tokenizer(BOS, add_special_tokens=False, return_tensors='pt').input_ids[0].to(self.word_embedding.weight.device)
+        max_model_len = getattr(self.model.config, "max_position_embeddings", 2048)
+        input_ids = input_ids[-max_model_len:]  # Truncate from the left if too long
         bos_embeds = self.word_embedding(input_ids)        
         pad_embeds = self.word_embedding(
             torch.tensor(self.tokenizer.pad_token_id).to(self.word_embedding.weight.device)
@@ -137,9 +170,16 @@ class GraphLLM(torch.nn.Module):
         # encode graphs
         graph_embeds = self.encode_graphs(samples)
         graph_embeds = self.projector(graph_embeds)
-        print("graph_embeds.shape after projection:", graph_embeds.shape)
-        print("graph_embeds[0].shape after projection:", graph_embeds[0].shape)
-        print("bos_embeds.shape:", bos_embeds.shape)
+        
+
+        # Add embedding validation
+        if torch.isnan(graph_embeds).any() or torch.isinf(graph_embeds).any():
+            print("NaN/Inf in graph_embeds")
+            return torch.tensor(float('nan'), device=self.device)
+        
+        # print("graph_embeds.shape after projection:", graph_embeds.shape)
+        # print("graph_embeds[0].shape after projection:", graph_embeds[0].shape)
+        # print("bos_embeds.shape:", bos_embeds.shape)
 
         batch_size = len(samples['id'])
         batch_inputs_embeds = []
@@ -151,7 +191,8 @@ class GraphLLM(torch.nn.Module):
             input_ids = descriptions.input_ids[i][:self.max_txt_len] + questions.input_ids[i] + eos_user_tokens.input_ids + label_input_ids
             inputs_embeds = self.word_embedding(torch.tensor(input_ids).to(self.model.device))
             inputs_embeds = torch.cat([bos_embeds, graph_embeds[i].unsqueeze(0), inputs_embeds], dim=0)
-
+            if torch.isnan(inputs_embeds).any() or torch.isinf(inputs_embeds).any():
+                print("NaN/Inf in inputs_embeds")
             batch_inputs_embeds.append(inputs_embeds)
             batch_attention_mask.append([1] * inputs_embeds.shape[0])
             label_input_ids = [IGNORE_INDEX] * (inputs_embeds.shape[0]-len(label_input_ids))+label_input_ids

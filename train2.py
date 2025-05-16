@@ -1,3 +1,4 @@
+# train2.py
 import os
 import wandb
 import gc
@@ -44,6 +45,33 @@ def main(args):
     val_dataset = [dataset[i] for i in idx_split['val'] if dataset[i] is not None]
     test_dataset = [dataset[i] for i in idx_split['test'] if dataset[i] is not None]
 
+    # display dataset[0] of each dataset in a readable format
+    i = 0
+    data = train_dataset[i]
+    print('Train Dataset:')
+    print(f'Index: {i}')
+    print(f'Question: {data["question"]}')
+    print(f'Answer: {data["answer"]}')
+    print(f'Graph: {data["graph"]}')
+    print(f'Description: {data["desc"]}')
+    print('---')
+    print('Val Dataset:')
+    data = val_dataset[i]
+    print(f'Index: {i}')
+    print(f'Question: {data["question"]}')
+    print(f'Answer: {data["answer"]}')
+    print(f'Graph: {data["graph"]}')
+    print(f'Description: {data["desc"]}')
+    print('---')
+    print('Test Dataset:')
+    data = test_dataset[i]
+    print(f'Index: {i}')
+    print(f'Question: {data["question"]}')
+    print(f'Answer: {data["answer"]}')
+    print(f'Graph: {data["graph"]}')
+    print(f'Description: {data["desc"]}')
+    print('---')
+
     args.batch_size = 1
     args.eval_batch_size = 1
     args.max_txt_len = 256
@@ -74,6 +102,7 @@ def main(args):
     num_training_steps = args.num_epochs * len(train_loader)
     progress_bar = tqdm(range(num_training_steps))
     best_val_loss = float('inf')
+    best_epoch = -1  # Add this line before the training loop
 
     for epoch in range(args.num_epochs):
 
@@ -81,12 +110,27 @@ def main(args):
         epoch_loss, accum_loss = 0., 0.
 
         for step, batch in enumerate(train_loader):
-
+            # Input validation
+            for k, v in batch.items():
+                if torch.is_tensor(v) and (torch.isnan(v).any() or torch.isinf(v).any()):
+                    print(f"Bad values in batch {k}, skipping")
+                    continue
             optimizer.zero_grad()
             loss = model(batch)
+            if torch.isnan(loss) or torch.isinf(loss):
+                print("NaN/Inf in loss, skipping batch")
+                continue
             loss.backward()
 
-            clip_grad_norm_(optimizer.param_groups[0]['params'], 0.1)
+            # Add gradient monitoring
+            grad_norm = clip_grad_norm_(optimizer.param_groups[0]['params'], 1.0)  # Reduced from 0.1
+            print({'Gradient Norm': grad_norm})
+
+            # Check for NaN gradients
+            for name, param in model.named_parameters():
+                if param.grad is not None and torch.isnan(param.grad).any():
+                    # print(f"NaN gradient in {name}")
+                    param.grad[torch.isnan(param.grad)] = 0
 
             if (step + 1) % args.grad_steps == 0:
                 adjust_learning_rate(optimizer.param_groups[0], args.lr, step / len(train_loader) + epoch, args)
@@ -101,7 +145,6 @@ def main(args):
                 accum_loss = 0.
 
             progress_bar.update(1)
-
         print(f"Epoch: {epoch}|{args.num_epochs}: Train Loss (Epoch Mean): {epoch_loss / len(train_loader)}")
         wandb.log({'Train Loss (Epoch Mean)': epoch_loss / len(train_loader)})
 
@@ -109,6 +152,12 @@ def main(args):
         eval_output = []
         model.eval()
         with torch.no_grad():
+            for k, v in batch.items():
+                if torch.is_tensor(v):
+                    if torch.isnan(v).any() or torch.isinf(v).any():
+                        print(f"NaN or Inf detected in input {k}")
+                        print(v)
+                        exit(1)
             for step, batch in enumerate(val_loader):
                 loss = model(batch)
                 val_loss += loss.item()
@@ -121,7 +170,11 @@ def main(args):
             _save_checkpoint(model, optimizer, epoch, args, is_best=True)
             best_epoch = epoch
 
-        print(f'Epoch {epoch} Val Loss {val_loss} Best Val Loss {best_val_loss} Best Epoch {best_epoch}')
+        if best_epoch == -1:
+            print("Warning: No best epoch found (all val_loss were nan or worse than initial best_val_loss).")
+        else:
+            print(f'Epoch {epoch} Val Loss {val_loss} Best Val Loss {best_val_loss} Best Epoch {best_epoch}')
+        # print(f'Epoch {epoch} Val Loss {val_loss} Best Val Loss {best_val_loss} Best Epoch {best_epoch}')
 
         if epoch - best_epoch >= args.patience:
             print(f'Early stop at epoch {epoch}')

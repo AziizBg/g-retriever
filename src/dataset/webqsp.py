@@ -34,6 +34,21 @@ class WebQSPDataset(Dataset):
         self.dataset = datasets.concatenate_datasets([dataset['train'], dataset['validation'], dataset['test']]).select(range(sample_size))
         self.q_embs = torch.load(os.path.join(path, 'q_embs.pt'))
         self.sample_size = sample_size
+        # display each self.dataset[i] in a readable format
+        # for i in range(sample_size):
+        i = 0
+        data = self.dataset[i]
+        print(f'Index: {i}')
+        print(f'Question: {data["question"]}')
+        print(f'Answer: {data["answer"]}')
+        print(f'Graph: {data["graph"]}')
+        print(f'Description: {data["desc"]}')
+        print('---')    
+        # display q_embs in a readable format
+        q_emb = self.q_embs[i]
+        print(f'Q_emb: {q_emb}')
+        print('---')
+        
 
     def __len__(self):
         return self.sample_size
