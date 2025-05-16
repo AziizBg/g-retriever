@@ -50,6 +50,12 @@ def main(args):
     data = train_dataset[i]
     print('Train Dataset:')
     print(f'Index: {i}')
+    # print the attributes of the data dictionary
+    try:
+        print(data.keys())
+    except AttributeError:
+        print("Data is not a dictionary")
+        print(data.__dict__.keys())
     print(f'Question: {data["question"]}')
     print(f'Graph: {data["graph"]}')
     print(f'Description: {data["desc"]}')
@@ -58,7 +64,6 @@ def main(args):
     data = val_dataset[i]
     print(f'Index: {i}')
     print(f'Question: {data["question"]}')
-    print(f'Answer: {data["answer"]}')
     print(f'Graph: {data["graph"]}')
     print(f'Description: {data["desc"]}')
     print('---')
@@ -66,7 +71,6 @@ def main(args):
     data = test_dataset[i]
     print(f'Index: {i}')
     print(f'Question: {data["question"]}')
-    print(f'Answer: {data["answer"]}')
     print(f'Graph: {data["graph"]}')
     print(f'Description: {data["desc"]}')
     print('---')
