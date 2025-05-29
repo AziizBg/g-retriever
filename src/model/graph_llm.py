@@ -252,7 +252,17 @@ class GraphLLM(torch.nn.Module):
                     return torch.tensor(float('nan'), device=self.device)
                 
                 # Scale loss to prevent overflow
-                loss = outputs.loss / (torch.norm(outputs.logits, dim=-1).mean() + 1e-8)
+                logits = outputs.logits
+                logits = logits / (torch.norm(logits, dim=-1, keepdim=True) + 1e-8)
+                
+                # Compute cross entropy loss manually for better control
+                log_probs = F.log_softmax(logits, dim=-1)
+                loss = F.nll_loss(log_probs.view(-1, log_probs.size(-1)), label_input_ids.view(-1), ignore_index=IGNORE_INDEX)
+                
+                # Scale loss by sequence length
+                valid_tokens = (label_input_ids != IGNORE_INDEX).sum().float()
+                if valid_tokens > 0:
+                    loss = loss / valid_tokens
                 
                 # Clip loss to prevent extreme values
                 loss = torch.clamp(loss, min=-100.0, max=100.0)
