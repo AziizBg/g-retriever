@@ -62,21 +62,21 @@ class GraphTransformer(torch.nn.Module):
             torch.nn.Dropout(dropout)
         )
         
-        # Main transformer layers with reduced dimensions
+        # Main transformer layers with correct dimensions
         for _ in range(num_layers):
             self.convs.append(TransformerConv(
                 in_channels=hidden_channels,
-                out_channels=hidden_channels//num_heads,
+                out_channels=hidden_channels,  # Changed from hidden_channels//num_heads
                 heads=num_heads,
                 edge_dim=hidden_channels,
                 dropout=dropout,
                 bias=False,  # Disable bias for stability
-                concat=False  # Don't concatenate heads
+                concat=True  # Changed to True to maintain dimensions
             ))
         
         # Output projection with normalization and scaling
         self.output_proj = torch.nn.Sequential(
-            torch.nn.Linear(hidden_channels, hidden_channels),
+            torch.nn.Linear(hidden_channels * num_heads, hidden_channels),  # Account for concatenated heads
             torch.nn.LayerNorm(hidden_channels),
             torch.nn.GELU(),
             torch.nn.Dropout(dropout),
