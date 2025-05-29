@@ -103,15 +103,15 @@ class GraphLLM(torch.nn.Module):
         # Initialize weights with smaller values
         for layer in self.projector:
             if isinstance(layer, nn.Linear):
-                nn.init.xavier_uniform_(layer.weight, gain=0.001)  # Reduced from 0.01
+                nn.init.xavier_uniform_(layer.weight, gain=0.0001)  # Further reduced from 0.001
                 nn.init.zeros_(layer.bias)
 
         # Add gradient clipping hooks
         for p in self.projector.parameters():
-            p.register_hook(lambda grad: torch.clamp(grad, -0.1, 0.1))  # Reduced from 1.0
+            p.register_hook(lambda grad: torch.clamp(grad, -0.001, 0.001))  # Further reduced from 0.1
 
         # Add loss scaling factor
-        self.loss_scale = 0.1  # Scale down loss to prevent overflow
+        self.loss_scale = 0.01  # Further reduced from 0.1
 
     @property
     def device(self):
@@ -278,7 +278,7 @@ class GraphLLM(torch.nn.Module):
                 loss = loss * self.loss_scale
                 
                 # Clip loss to prevent extreme values
-                loss = torch.clamp(loss, min=-10.0, max=10.0)  # Reduced from 100.0
+                loss = torch.clamp(loss, min=-1.0, max=1.0)  # Further reduced from 10.0
                 
                 return loss
                 
