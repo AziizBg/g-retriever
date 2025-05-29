@@ -71,9 +71,13 @@ def main(args):
     # Step 4 Set Optimizer
     params = [p for _, p in model.named_parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(
-        [{'params': params, 'lr': args.lr, 'weight_decay': args.wd}],
+        [{'params': params, 'lr': args.lr * 0.1, 'weight_decay': args.wd}],  # Start with 10x smaller learning rate
         betas=(0.9, 0.95)
     )
+    
+    # Add gradient scaler for mixed precision training
+    scaler = torch.cuda.amp.GradScaler()
+    
     trainable_params, all_param = model.print_trainable_params()
     print(f"trainable params: {trainable_params} || all params: {all_param} || trainable%: {100 * trainable_params / all_param}")
 
@@ -86,6 +90,7 @@ def main(args):
     for epoch in range(args.num_epochs):
         model.train()
         epoch_loss, accum_loss = 0., 0.
+        num_batches = 0
 
         for step, batch in enumerate(train_loader):
             # Skip batch with NaN/Inf
@@ -94,32 +99,36 @@ def main(args):
                 continue
 
             optimizer.zero_grad()
-            loss = model(batch)
-            if torch.isnan(loss) or torch.isinf(loss):
-                print("NaN/Inf in loss, skipping batch")
+            
+            # Use gradient scaling for mixed precision
+            with torch.cuda.amp.autocast():
+                loss = model(batch)
+                if torch.isnan(loss) or torch.isinf(loss):
+                    print("NaN/Inf in loss, skipping batch")
+                    continue
+                    
+                # Scale loss to prevent overflow
+                loss = loss / args.grad_steps
+                
+            # Scale gradients and handle overflow
+            scaler.scale(loss).backward()
+            
+            # Unscale gradients for clipping
+            scaler.unscale_(optimizer)
+            
+            # Clip gradients
+            grad_norm = clip_grad_norm_(optimizer.param_groups[0]['params'], 0.5)
+            print({'Gradient Norm': grad_norm})
+            
+            # Skip update if gradients are NaN/Inf
+            if grad_norm.isnan() or grad_norm.isinf():
+                print("NaN/Inf in gradient norm, skipping update")
+                optimizer.zero_grad()
                 continue
                 
-            # Add gradient monitoring before backward pass
-            for name, param in model.named_parameters():
-                if param.grad is not None:
-                    if torch.isnan(param.grad).any():
-                        param.grad[torch.isnan(param.grad)] = 0
-                    if torch.isinf(param.grad).any():
-                        param.grad[torch.isinf(param.grad)] = 0
-                        
-            loss.backward()
-
-            # Reduce gradient clipping threshold
-            grad_norm = clip_grad_norm_(optimizer.param_groups[0]['params'], 0.5)  # Reduced from 1.0
-            print({'Gradient Norm': grad_norm})
-
-            # Additional gradient cleanup after backward pass
-            for name, param in model.named_parameters():
-                if param.grad is not None:
-                    if torch.isnan(param.grad).any():
-                        param.grad[torch.isnan(param.grad)] = 0
-                    if torch.isinf(param.grad).any():
-                        param.grad[torch.isinf(param.grad)] = 0
+            # Step optimizer with gradient scaling
+            scaler.step(optimizer)
+            scaler.update()
 
             if (step + 1) % args.grad_steps == 0:
                 # Add learning rate warmup
@@ -131,9 +140,9 @@ def main(args):
                 else:
                     adjust_learning_rate(optimizer.param_groups[0], args.lr, step / len(train_loader) + epoch, args)
 
-            optimizer.step()
-            epoch_loss += loss.item()
-            accum_loss += loss.item()
+            epoch_loss += loss.item() * args.grad_steps  # Scale back up for logging
+            accum_loss += loss.item() * args.grad_steps
+            num_batches += 1
 
             if (step + 1) % args.grad_steps == 0:
                 lr = optimizer.param_groups[0]["lr"]
@@ -142,7 +151,7 @@ def main(args):
 
             progress_bar.update(1)
 
-        mean_train_loss = epoch_loss / len(train_loader)
+        mean_train_loss = epoch_loss / num_batches if num_batches > 0 else float('inf')
         print(f"Epoch {epoch}/{args.num_epochs} - Train Loss: {mean_train_loss:.4f}")
         wandb.log({'Train Loss (Epoch Mean)': mean_train_loss})
 
