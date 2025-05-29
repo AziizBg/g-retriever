@@ -38,23 +38,31 @@ class GraphTransformer(torch.nn.Module):
         self.convs = torch.nn.ModuleList()
         self.dropout = dropout
         
-        # Input projection with normalization
+        # Input projection with normalization and scaling
         self.input_proj = torch.nn.Sequential(
             torch.nn.Linear(in_channels, hidden_channels),
             torch.nn.LayerNorm(hidden_channels),
             torch.nn.GELU(),
-            torch.nn.Dropout(dropout)
-        )
-        
-        # Edge projection with normalization
-        self.edge_proj = torch.nn.Sequential(
-            torch.nn.Linear(in_channels, hidden_channels),
+            torch.nn.Dropout(dropout),
+            torch.nn.Linear(hidden_channels, hidden_channels),
             torch.nn.LayerNorm(hidden_channels),
             torch.nn.GELU(),
             torch.nn.Dropout(dropout)
         )
         
-        # Main transformer layers
+        # Edge projection with normalization and scaling
+        self.edge_proj = torch.nn.Sequential(
+            torch.nn.Linear(in_channels, hidden_channels),
+            torch.nn.LayerNorm(hidden_channels),
+            torch.nn.GELU(),
+            torch.nn.Dropout(dropout),
+            torch.nn.Linear(hidden_channels, hidden_channels),
+            torch.nn.LayerNorm(hidden_channels),
+            torch.nn.GELU(),
+            torch.nn.Dropout(dropout)
+        )
+        
+        # Main transformer layers with reduced dimensions
         for _ in range(num_layers):
             self.convs.append(TransformerConv(
                 in_channels=hidden_channels,
@@ -62,11 +70,16 @@ class GraphTransformer(torch.nn.Module):
                 heads=num_heads,
                 edge_dim=hidden_channels,
                 dropout=dropout,
-                bias=False  # Disable bias for stability
+                bias=False,  # Disable bias for stability
+                concat=False  # Don't concatenate heads
             ))
         
-        # Output projection with normalization
+        # Output projection with normalization and scaling
         self.output_proj = torch.nn.Sequential(
+            torch.nn.Linear(hidden_channels, hidden_channels),
+            torch.nn.LayerNorm(hidden_channels),
+            torch.nn.GELU(),
+            torch.nn.Dropout(dropout),
             torch.nn.Linear(hidden_channels, out_channels),
             torch.nn.LayerNorm(out_channels),
             torch.nn.GELU(),
@@ -76,15 +89,19 @@ class GraphTransformer(torch.nn.Module):
         # Initialize weights with smaller values
         self.apply(self._init_weights)
         
+        # Add gradient clipping hooks
+        for p in self.parameters():
+            p.register_hook(lambda grad: torch.clamp(grad, -0.01, 0.01))
+        
     def _init_weights(self, module):
         if isinstance(module, torch.nn.Linear):
             # Use smaller initialization for stability
-            torch.nn.init.xavier_uniform_(module.weight, gain=0.01)
+            torch.nn.init.xavier_uniform_(module.weight, gain=0.001)
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
         elif isinstance(module, torch.nn.LayerNorm):
             module.bias.data.zero_()
-            module.weight.data.fill_(1.0)
+            module.weight.data.fill_(0.1)  # Smaller scale for LayerNorm
 
     def reset_parameters(self):
         for conv in self.convs:
@@ -101,20 +118,26 @@ class GraphTransformer(torch.nn.Module):
 
     def forward(self, x, adj_t, edge_attr):
         # Input normalization and projection
+        x = F.normalize(x, p=2, dim=-1)  # Normalize input features
+        edge_attr = F.normalize(edge_attr, p=2, dim=-1)  # Normalize edge features
+        
         x = self.input_proj(x)
         edge_attr = self.edge_proj(edge_attr)
         
         # Store initial values for residual connections
         residual = x
         
-        # Apply transformer layers with residual connections
+        # Apply transformer layers with residual connections and scaling
         for i, conv in enumerate(self.convs):
             # Apply transformer layer
             x_new = conv(x, edge_index=adj_t, edge_attr=edge_attr)
             
-            # Add residual connection
+            # Scale down the output
+            x_new = x_new * 0.1
+            
+            # Add residual connection with scaling
             if i > 0:  # Skip first layer for residual
-                x = x_new + residual
+                x = x_new + residual * 0.1
                 residual = x
             else:
                 x = x_new
@@ -122,6 +145,9 @@ class GraphTransformer(torch.nn.Module):
             # Apply activation and dropout
             x = F.gelu(x)
             x = F.dropout(x, p=self.dropout, training=self.training)
+            
+            # Normalize after each layer
+            x = F.normalize(x, p=2, dim=-1)
         
         # Output projection
         x = self.output_proj(x)
