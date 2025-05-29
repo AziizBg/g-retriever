@@ -48,6 +48,21 @@ class GraphTransformer(torch.nn.Module):
         self.input_norm = torch.nn.LayerNorm(in_channels)
         self.edge_norm = torch.nn.LayerNorm(in_channels)
         self.output_norm = torch.nn.LayerNorm(out_channels)
+        
+        self.residual_norms = torch.nn.ModuleList([
+            torch.nn.LayerNorm(hidden_channels) for _ in range(num_layers - 1)
+        ])
+        
+        self.apply(self._init_weights)
+        
+    def _init_weights(self, module):
+        if isinstance(module, torch.nn.Linear):
+            torch.nn.init.xavier_uniform_(module.weight, gain=0.01)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, torch.nn.LayerNorm):
+            module.bias.data.zero_()
+            module.weight.data.fill_(1.0)
 
     def reset_parameters(self):
         for conv in self.convs:
@@ -57,13 +72,22 @@ class GraphTransformer(torch.nn.Module):
         self.input_norm.reset_parameters()
         self.edge_norm.reset_parameters()
         self.output_norm.reset_parameters()
+        for norm in self.residual_norms:
+            norm.reset_parameters()
 
     def forward(self, x, adj_t, edge_attr):
         x = self.input_norm(x)
         edge_attr = self.edge_norm(edge_attr)
         
+        residual = x
+        
         for i, conv in enumerate(self.convs[:-1]):
             x = conv(x, edge_index=adj_t, edge_attr=edge_attr)
+            
+            if i > 0:
+                x = x + self.residual_norms[i-1](residual)
+                residual = x
+            
             x = self.bns[i](x)
             x = F.relu(x)
             x = F.dropout(x, p=self.dropout, training=self.training)

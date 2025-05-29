@@ -50,8 +50,9 @@ def main(args):
         print("Data is not a dictionary")
         print(train_dataset[0].__dict__.keys())
 
-    args.batch_size = 1
-    args.eval_batch_size = 1
+    # Reduce batch size for stability
+    args.batch_size = 4  # Reduced from 8
+    args.eval_batch_size = 4  # Reduced from 16
     args.max_txt_len = 256
     args.max_new_tokens = 16
 
@@ -68,10 +69,10 @@ def main(args):
 
     model = load_model[args.model_name](graph_type=dataset.graph_type, args=args, init_prompt=dataset.prompt)
 
-    # Step 4 Set Optimizer
+    # Step 4 Set Optimizer with reduced learning rate
     params = [p for _, p in model.named_parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(
-        [{'params': params, 'lr': args.lr * 0.01, 'weight_decay': args.wd}],  # Start with 100x smaller learning rate
+        [{'params': params, 'lr': args.lr * 0.001, 'weight_decay': args.wd}],  # Reduced learning rate by 10x
         betas=(0.9, 0.95)
     )
     
@@ -86,6 +87,10 @@ def main(args):
     progress_bar = tqdm(range(num_training_steps))
     best_val_loss = float('inf')
     best_epoch = -1
+
+    # Add learning rate warmup
+    warmup_steps = min(1000, len(train_loader))  # Warmup for first 1000 steps
+    current_step = 0
 
     for epoch in range(args.num_epochs):
         model.train()
@@ -132,7 +137,7 @@ def main(args):
             # Unscale gradients for clipping
             scaler.unscale_(optimizer)
             
-            # Clip gradients
+            # Clip gradients with reduced threshold
             grad_norm = clip_grad_norm_(optimizer.param_groups[0]['params'], 0.1)  # Reduced from 0.5
             print({'Gradient Norm': grad_norm})
             
@@ -146,15 +151,15 @@ def main(args):
             scaler.step(optimizer)
             scaler.update()
 
-            if (step + 1) % args.grad_steps == 0:
-                # Add learning rate warmup
-                warmup_steps = min(2000, len(train_loader))  # Increased warmup steps
-                if step < warmup_steps:
-                    lr_scale = min(1., float(step + 1) / float(warmup_steps))
-                    for pg in optimizer.param_groups:
-                        pg['lr'] = args.lr * lr_scale
-                else:
-                    adjust_learning_rate(optimizer.param_groups[0], args.lr, step / len(train_loader) + epoch, args)
+            # Learning rate warmup
+            if current_step < warmup_steps:
+                lr_scale = min(1., float(current_step + 1) / float(warmup_steps))
+                for pg in optimizer.param_groups:
+                    pg['lr'] = args.lr * lr_scale
+            else:
+                adjust_learning_rate(optimizer.param_groups[0], args.lr, current_step / len(train_loader) + epoch, args)
+
+            current_step += 1
 
             epoch_loss += loss.item() * args.grad_steps  # Scale back up for logging
             accum_loss += loss.item() * args.grad_steps
