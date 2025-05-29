@@ -71,7 +71,7 @@ def main(args):
     # Step 4 Set Optimizer
     params = [p for _, p in model.named_parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(
-        [{'params': params, 'lr': args.lr * 0.1, 'weight_decay': args.wd}],  # Start with 10x smaller learning rate
+        [{'params': params, 'lr': args.lr * 0.01, 'weight_decay': args.wd}],  # Start with 100x smaller learning rate
         betas=(0.9, 0.95)
     )
     
@@ -93,22 +93,38 @@ def main(args):
         num_batches = 0
 
         for step, batch in enumerate(train_loader):
-            # Skip batch with NaN/Inf
-            if any(torch.isnan(v).any() or torch.isinf(v).any() for v in batch.values() if torch.is_tensor(v)):
-                print(f"Bad values in batch {step}, skipping")
-                continue
+            # Validate and normalize input data
+            for k, v in batch.items():
+                if torch.is_tensor(v):
+                    if torch.isnan(v).any() or torch.isinf(v).any():
+                        print(f"Bad values in {k}, skipping batch")
+                        continue
+                    # Normalize tensor values if they're not binary or categorical
+                    if v.dtype in [torch.float32, torch.float16, torch.float64]:
+                        v_norm = torch.norm(v, dim=-1, keepdim=True)
+                        v_norm[v_norm == 0] = 1  # Prevent division by zero
+                        v = v / v_norm
 
             optimizer.zero_grad()
             
             # Use gradient scaling for mixed precision
             with torch.cuda.amp.autocast():
-                loss = model(batch)
-                if torch.isnan(loss) or torch.isinf(loss):
-                    print("NaN/Inf in loss, skipping batch")
-                    continue
-                    
-                # Scale loss to prevent overflow
-                loss = loss / args.grad_steps
+                try:
+                    loss = model(batch)
+                    if torch.isnan(loss) or torch.isinf(loss):
+                        print("NaN/Inf in loss, skipping batch")
+                        continue
+                        
+                    # Scale loss to prevent overflow
+                    loss = loss / args.grad_steps
+                except RuntimeError as e:
+                    if "out of memory" in str(e):
+                        if hasattr(torch.cuda, 'empty_cache'):
+                            torch.cuda.empty_cache()
+                        print("GPU OOM, skipping batch")
+                        continue
+                    else:
+                        raise e
                 
             # Scale gradients and handle overflow
             scaler.scale(loss).backward()
@@ -117,7 +133,7 @@ def main(args):
             scaler.unscale_(optimizer)
             
             # Clip gradients
-            grad_norm = clip_grad_norm_(optimizer.param_groups[0]['params'], 0.5)
+            grad_norm = clip_grad_norm_(optimizer.param_groups[0]['params'], 0.1)  # Reduced from 0.5
             print({'Gradient Norm': grad_norm})
             
             # Skip update if gradients are NaN/Inf
@@ -132,7 +148,7 @@ def main(args):
 
             if (step + 1) % args.grad_steps == 0:
                 # Add learning rate warmup
-                warmup_steps = min(1000, len(train_loader))
+                warmup_steps = min(2000, len(train_loader))  # Increased warmup steps
                 if step < warmup_steps:
                     lr_scale = min(1., float(step + 1) / float(warmup_steps))
                     for pg in optimizer.param_groups:
