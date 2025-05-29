@@ -66,17 +66,17 @@ class GraphTransformer(torch.nn.Module):
         for _ in range(num_layers):
             self.convs.append(TransformerConv(
                 in_channels=hidden_channels,
-                out_channels=hidden_channels,  # Changed from hidden_channels//num_heads
+                out_channels=hidden_channels // num_heads,  # Each head processes a smaller dimension
                 heads=num_heads,
                 edge_dim=hidden_channels,
                 dropout=dropout,
                 bias=False,  # Disable bias for stability
-                concat=True  # Changed to True to maintain dimensions
+                concat=True  # Concatenate heads to get back to hidden_channels
             ))
         
         # Output projection with normalization and scaling
         self.output_proj = torch.nn.Sequential(
-            torch.nn.Linear(hidden_channels * num_heads, hidden_channels),  # Account for concatenated heads
+            torch.nn.Linear(hidden_channels, hidden_channels),  # Input is already concatenated
             torch.nn.LayerNorm(hidden_channels),
             torch.nn.GELU(),
             torch.nn.Dropout(dropout),
