@@ -82,8 +82,13 @@ class GraphLLM(torch.nn.Module):
             num_heads=args.gnn_num_heads,
         ).to(self.model.device)
 
+        # Initialize projector with smaller weights and more layers
         self.projector = nn.Sequential(
             nn.Linear(args.gnn_hidden_dim, 2048),
+            nn.LayerNorm(2048),
+            nn.Dropout(0.1),
+            nn.GELU(),
+            nn.Linear(2048, 2048),
             nn.LayerNorm(2048),
             nn.Dropout(0.1),
             nn.GELU(),
@@ -95,13 +100,18 @@ class GraphLLM(torch.nn.Module):
             nn.LayerNorm(llm_embed_dim)
         ).to(self.model.device)
 
+        # Initialize weights with smaller values
         for layer in self.projector:
             if isinstance(layer, nn.Linear):
-                nn.init.xavier_uniform_(layer.weight, gain=0.01)
+                nn.init.xavier_uniform_(layer.weight, gain=0.001)  # Reduced from 0.01
                 nn.init.zeros_(layer.bias)
 
+        # Add gradient clipping hooks
         for p in self.projector.parameters():
-            p.register_hook(lambda grad: torch.clamp(grad, -1.0, 1.0))
+            p.register_hook(lambda grad: torch.clamp(grad, -0.1, 0.1))  # Reduced from 1.0
+
+        # Add loss scaling factor
+        self.loss_scale = 0.1  # Scale down loss to prevent overflow
 
     @property
     def device(self):
@@ -259,13 +269,16 @@ class GraphLLM(torch.nn.Module):
                 log_probs = F.log_softmax(logits, dim=-1)
                 loss = F.nll_loss(log_probs.view(-1, log_probs.size(-1)), label_input_ids.view(-1), ignore_index=IGNORE_INDEX)
                 
-                # Scale loss by sequence length
+                # Scale loss by sequence length and loss scale factor
                 valid_tokens = (label_input_ids != IGNORE_INDEX).sum().float()
                 if valid_tokens > 0:
                     loss = loss / valid_tokens
                 
+                # Apply loss scaling
+                loss = loss * self.loss_scale
+                
                 # Clip loss to prevent extreme values
-                loss = torch.clamp(loss, min=-100.0, max=100.0)
+                loss = torch.clamp(loss, min=-10.0, max=10.0)  # Reduced from 100.0
                 
                 return loss
                 
