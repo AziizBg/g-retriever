@@ -36,6 +36,7 @@ class GraphTransformer(torch.nn.Module):
     def __init__(self, in_channels, hidden_channels, out_channels, num_layers, dropout, num_heads=-1):
         super(GraphTransformer, self).__init__()
         self.convs = torch.nn.ModuleList()
+        self.dropout = dropout
         
         # Input projection with normalization
         self.input_proj = torch.nn.Sequential(
