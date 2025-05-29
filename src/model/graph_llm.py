@@ -171,19 +171,20 @@ class GraphLLM(torch.nn.Module):
         bos_embeds = self.word_embedding(input_ids)
         pad_embeds = self.word_embedding(torch.tensor(self.tokenizer.pad_token_id).to(self.device)).unsqueeze(0)
 
-        # Get graph embeddings
-        graph_embeds = self.encode_graphs(samples)
-        if graph_embeds is None:
-            return torch.tensor(float('nan'), device=self.device)
+        # Get graph embeddings with gradient scaling
+        with torch.cuda.amp.autocast():
+            graph_embeds = self.encode_graphs(samples)
+            if graph_embeds is None:
+                return torch.tensor(float('nan'), device=self.device)
 
-        # Project graph embeddings
-        graph_embeds = self.projector(graph_embeds)
-        if torch.isnan(graph_embeds).any() or torch.isinf(graph_embeds).any():
-            print("NaN/Inf in graph_embeds after projector")
-            return torch.tensor(float('nan'), device=self.device)
+            # Project graph embeddings with gradient scaling
+            graph_embeds = self.projector(graph_embeds)
+            if torch.isnan(graph_embeds).any() or torch.isinf(graph_embeds).any():
+                print("NaN/Inf in graph_embeds after projector")
+                return torch.tensor(float('nan'), device=self.device)
 
-        # Normalize projected embeddings
-        graph_embeds = F.normalize(graph_embeds, p=2, dim=-1)
+            # Normalize projected embeddings
+            graph_embeds = F.normalize(graph_embeds, p=2, dim=-1)
 
         batch_size = len(samples['id'])
         batch_inputs_embeds, batch_attention_mask, batch_label_input_ids = [], [], []
@@ -198,8 +199,15 @@ class GraphLLM(torch.nn.Module):
                 print(f"Sequence too long ({len(input_ids)}), truncating")
                 input_ids = input_ids[:2048]
             
+            # Scale embeddings to prevent overflow
             inputs_embeds = self.word_embedding(torch.tensor(input_ids).to(self.device))
-            inputs_embeds = torch.cat([bos_embeds, graph_embeds[i].unsqueeze(0), inputs_embeds], dim=0)
+            inputs_embeds = inputs_embeds / (torch.norm(inputs_embeds, dim=-1, keepdim=True) + 1e-8)
+            
+            # Scale graph embeddings
+            graph_embed = graph_embeds[i].unsqueeze(0)
+            graph_embed = graph_embed / (torch.norm(graph_embed, dim=-1, keepdim=True) + 1e-8)
+            
+            inputs_embeds = torch.cat([bos_embeds, graph_embed, inputs_embeds], dim=0)
 
             if torch.isnan(inputs_embeds).any() or torch.isinf(inputs_embeds).any():
                 print("NaN/Inf in inputs_embeds")
@@ -230,15 +238,38 @@ class GraphLLM(torch.nn.Module):
             torch.cuda.empty_cache()
 
         with self.maybe_autocast():
-            outputs = self.model(
-                inputs_embeds=inputs_embeds,
-                attention_mask=attention_mask,
-                return_dict=True,
-                labels=label_input_ids,
-            )
-
-        return outputs.loss
-
+            try:
+                outputs = self.model(
+                    inputs_embeds=inputs_embeds,
+                    attention_mask=attention_mask,
+                    return_dict=True,
+                    labels=label_input_ids,
+                )
+                
+                # Check for NaN/Inf in loss
+                if torch.isnan(outputs.loss) or torch.isinf(outputs.loss):
+                    print("NaN/Inf in model output loss")
+                    return torch.tensor(float('nan'), device=self.device)
+                
+                # Scale loss to prevent overflow
+                loss = outputs.loss / (torch.norm(outputs.logits, dim=-1).mean() + 1e-8)
+                
+                # Clip loss to prevent extreme values
+                loss = torch.clamp(loss, min=-100.0, max=100.0)
+                
+                return loss
+                
+            except RuntimeError as e:
+                if "out of memory" in str(e):
+                    if hasattr(torch.cuda, 'empty_cache'):
+                        torch.cuda.empty_cache()
+                    print("GPU OOM in forward pass")
+                    return torch.tensor(float('nan'), device=self.device)
+                elif "indexing errors" in str(e):
+                    print("Sequence length error in forward pass")
+                    return torch.tensor(float('nan'), device=self.device)
+                else:
+                    raise e
 
     def inference(self, samples):
 

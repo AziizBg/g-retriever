@@ -51,10 +51,11 @@ def main(args):
         print(train_dataset[0].__dict__.keys())
 
     # Reduce batch size and sequence length for memory efficiency
-    args.batch_size = 2  # Further reduced from 4
-    args.eval_batch_size = 2  # Further reduced from 4
-    args.max_txt_len = 128  # Reduced from 256
+    args.batch_size = 1  # Further reduced from 2
+    args.eval_batch_size = 1  # Further reduced from 2
+    args.max_txt_len = 64  # Further reduced from 128
     args.max_new_tokens = 16
+    args.grad_steps = 4  # Increased from 2 for gradient accumulation
 
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, drop_last=True, pin_memory=True, shuffle=True, collate_fn=collate_fn)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, drop_last=False, pin_memory=True, shuffle=False, collate_fn=collate_fn)
@@ -72,7 +73,7 @@ def main(args):
     # Step 4 Set Optimizer with reduced learning rate
     params = [p for _, p in model.named_parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(
-        [{'params': params, 'lr': args.lr * 0.001, 'weight_decay': args.wd}],
+        [{'params': params, 'lr': args.lr * 0.0001, 'weight_decay': args.wd}],  # Further reduced learning rate
         betas=(0.9, 0.95)
     )
     
@@ -96,6 +97,7 @@ def main(args):
         model.train()
         epoch_loss, accum_loss = 0., 0.
         num_batches = 0
+        optimizer.zero_grad()  # Zero gradients at start of epoch
 
         for step, batch in enumerate(train_loader):
             # Clear GPU cache before each batch
@@ -114,8 +116,6 @@ def main(args):
                         v_norm[v_norm == 0] = 1  # Prevent division by zero
                         v = v / v_norm
 
-            optimizer.zero_grad()
-            
             # Use gradient scaling for mixed precision
             with torch.cuda.amp.autocast():
                 try:
@@ -141,32 +141,35 @@ def main(args):
             # Scale gradients and handle overflow
             scaler.scale(loss).backward()
             
-            # Unscale gradients for clipping
-            scaler.unscale_(optimizer)
-            
-            # Clip gradients with reduced threshold
-            grad_norm = clip_grad_norm_(optimizer.param_groups[0]['params'], 0.1)
-            print({'Gradient Norm': grad_norm})
-            
-            # Skip update if gradients are NaN/Inf
-            if grad_norm.isnan() or grad_norm.isinf():
-                print("NaN/Inf in gradient norm, skipping update")
-                optimizer.zero_grad()
-                continue
+            # Gradient accumulation
+            if (step + 1) % args.grad_steps == 0:
+                # Unscale gradients for clipping
+                scaler.unscale_(optimizer)
                 
-            # Step optimizer with gradient scaling
-            scaler.step(optimizer)
-            scaler.update()
+                # Clip gradients with reduced threshold
+                grad_norm = clip_grad_norm_(optimizer.param_groups[0]['params'], 0.1)
+                print({'Gradient Norm': grad_norm})
+                
+                # Skip update if gradients are NaN/Inf
+                if grad_norm.isnan() or grad_norm.isinf():
+                    print("NaN/Inf in gradient norm, skipping update")
+                    optimizer.zero_grad()
+                    continue
+                    
+                # Step optimizer with gradient scaling
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
 
-            # Learning rate warmup
-            if current_step < warmup_steps:
-                lr_scale = min(1., float(current_step + 1) / float(warmup_steps))
-                for pg in optimizer.param_groups:
-                    pg['lr'] = args.lr * lr_scale
-            else:
-                adjust_learning_rate(optimizer.param_groups[0], args.lr, current_step / len(train_loader) + epoch, args)
+                # Learning rate warmup
+                if current_step < warmup_steps:
+                    lr_scale = min(1., float(current_step + 1) / float(warmup_steps))
+                    for pg in optimizer.param_groups:
+                        pg['lr'] = args.lr * lr_scale
+                else:
+                    adjust_learning_rate(optimizer.param_groups[0], args.lr, current_step / len(train_loader) + epoch, args)
 
-            current_step += 1
+                current_step += 1
 
             epoch_loss += loss.item() * args.grad_steps
             accum_loss += loss.item() * args.grad_steps
