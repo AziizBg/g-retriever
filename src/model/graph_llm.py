@@ -11,6 +11,7 @@ from peft import (
     get_peft_model,
     prepare_model_for_kbit_training,
 )
+import torch.nn.functional as F
 
 BOS = '<s>[INST]'
 EOS_USER = '[/INST]'
@@ -115,28 +116,54 @@ class GraphLLM(torch.nn.Module):
             print("Skipping batch due to missing or empty graph data.")
             return None
 
+        # Validate input tensors
+        if torch.isnan(graphs.x).any() or torch.isinf(graphs.x).any():
+            print("NaN/Inf in input node features")
+            return None
+        if torch.isnan(graphs.edge_attr).any() or torch.isinf(graphs.edge_attr).any():
+            print("NaN/Inf in input edge features")
+            return None
+
+        # Normalize input features
+        graphs.x = F.normalize(graphs.x, p=2, dim=-1)
+        graphs.edge_attr = F.normalize(graphs.edge_attr, p=2, dim=-1)
+
         graphs = graphs.to(self.model.device)
         n_embeds, _ = self.graph_encoder(graphs.x, graphs.edge_index.long(), graphs.edge_attr)
 
         if torch.isnan(n_embeds).any() or torch.isinf(n_embeds).any():
             print("NaN/Inf in n_embeds from graph_encoder")
-            print("graphs.x:", graphs.x)
-            print("graphs.edge_index:", graphs.edge_index)
-            print("graphs.edge_attr:", graphs.edge_attr)
             return None
 
         g_embeds = scatter(n_embeds, graphs.batch, dim=0, reduce='mean')
+        
+        # Normalize graph embeddings
+        g_embeds = F.normalize(g_embeds, p=2, dim=-1)
+        
         return g_embeds
 
     def forward(self, samples):
+        # Validate input tensors
         for k, v in samples.items():
             if torch.is_tensor(v) and (torch.isnan(v).any() or torch.isinf(v).any()):
                 print(f"NaN/Inf detected in input {k}")
                 return torch.tensor(float('nan'), device=self.device)
 
+        # Tokenize inputs
         questions = self.tokenizer(samples["question"], add_special_tokens=False)
         descriptions = self.tokenizer(samples["desc"], add_special_tokens=False)
         labels = self.tokenizer(samples["label"], add_special_tokens=False)
+
+        # Validate tokenized inputs
+        if not all(len(q) > 0 for q in questions.input_ids):
+            print("Empty question after tokenization")
+            return torch.tensor(float('nan'), device=self.device)
+        if not all(len(d) > 0 for d in descriptions.input_ids):
+            print("Empty description after tokenization")
+            return torch.tensor(float('nan'), device=self.device)
+        if not all(len(l) > 0 for l in labels.input_ids):
+            print("Empty label after tokenization")
+            return torch.tensor(float('nan'), device=self.device)
 
         eos_tokens = self.tokenizer(EOS, add_special_tokens=False)
         eos_user_tokens = self.tokenizer(EOS_USER, add_special_tokens=False)
@@ -144,14 +171,19 @@ class GraphLLM(torch.nn.Module):
         bos_embeds = self.word_embedding(input_ids)
         pad_embeds = self.word_embedding(torch.tensor(self.tokenizer.pad_token_id).to(self.device)).unsqueeze(0)
 
+        # Get graph embeddings
         graph_embeds = self.encode_graphs(samples)
         if graph_embeds is None:
             return torch.tensor(float('nan'), device=self.device)
 
+        # Project graph embeddings
         graph_embeds = self.projector(graph_embeds)
         if torch.isnan(graph_embeds).any() or torch.isinf(graph_embeds).any():
             print("NaN/Inf in graph_embeds after projector")
             return torch.tensor(float('nan'), device=self.device)
+
+        # Normalize projected embeddings
+        graph_embeds = F.normalize(graph_embeds, p=2, dim=-1)
 
         batch_size = len(samples['id'])
         batch_inputs_embeds, batch_attention_mask, batch_label_input_ids = [], [], []
@@ -170,6 +202,10 @@ class GraphLLM(torch.nn.Module):
             batch_attention_mask.append([1] * inputs_embeds.shape[0])
             label_input_ids = [IGNORE_INDEX] * (inputs_embeds.shape[0] - len(label_input_ids)) + label_input_ids
             batch_label_input_ids.append(label_input_ids)
+
+        if not batch_inputs_embeds:
+            print("No valid inputs after processing")
+            return torch.tensor(float('nan'), device=self.device)
 
         max_length = max([x.shape[0] for x in batch_inputs_embeds])
         for i in range(batch_size):

@@ -47,6 +47,7 @@ class GraphTransformer(torch.nn.Module):
         
         self.input_norm = torch.nn.LayerNorm(in_channels)
         self.edge_norm = torch.nn.LayerNorm(in_channels)
+        self.output_norm = torch.nn.LayerNorm(out_channels)
 
     def reset_parameters(self):
         for conv in self.convs:
@@ -55,6 +56,7 @@ class GraphTransformer(torch.nn.Module):
             bn.reset_parameters()
         self.input_norm.reset_parameters()
         self.edge_norm.reset_parameters()
+        self.output_norm.reset_parameters()
 
     def forward(self, x, adj_t, edge_attr):
         x = self.input_norm(x)
@@ -65,10 +67,9 @@ class GraphTransformer(torch.nn.Module):
             x = self.bns[i](x)
             x = F.relu(x)
             x = F.dropout(x, p=self.dropout, training=self.training)
-            if i > 0:
-                x = x + self.convs[i-1](x, edge_index=adj_t, edge_attr=edge_attr)
         
         x = self.convs[-1](x, edge_index=adj_t, edge_attr=edge_attr)
+        x = self.output_norm(x)
         
         x = F.normalize(x, p=2, dim=-1)
         edge_attr = F.normalize(edge_attr, p=2, dim=-1)
