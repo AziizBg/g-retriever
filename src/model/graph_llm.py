@@ -149,10 +149,10 @@ class GraphLLM(torch.nn.Module):
                 print(f"NaN/Inf detected in input {k}")
                 return torch.tensor(float('nan'), device=self.device)
 
-        # Tokenize inputs
-        questions = self.tokenizer(samples["question"], add_special_tokens=False)
-        descriptions = self.tokenizer(samples["desc"], add_special_tokens=False)
-        labels = self.tokenizer(samples["label"], add_special_tokens=False)
+        # Tokenize inputs with length limits
+        questions = self.tokenizer(samples["question"], add_special_tokens=False, truncation=True, max_length=self.max_txt_len // 2)
+        descriptions = self.tokenizer(samples["desc"], add_special_tokens=False, truncation=True, max_length=self.max_txt_len // 2)
+        labels = self.tokenizer(samples["label"], add_special_tokens=False, truncation=True, max_length=self.max_new_tokens)
 
         # Validate tokenized inputs
         if not all(len(q) > 0 for q in questions.input_ids):
@@ -189,8 +189,15 @@ class GraphLLM(torch.nn.Module):
         batch_inputs_embeds, batch_attention_mask, batch_label_input_ids = [], [], []
 
         for i in range(batch_size):
+            # Ensure total sequence length is within limits
             label_input_ids = labels.input_ids[i][:self.max_new_tokens] + eos_tokens.input_ids
-            input_ids = descriptions.input_ids[i][:self.max_txt_len] + questions.input_ids[i] + eos_user_tokens.input_ids + label_input_ids
+            input_ids = descriptions.input_ids[i][:self.max_txt_len // 2] + questions.input_ids[i] + eos_user_tokens.input_ids + label_input_ids
+            
+            # Check if sequence length is within model limits
+            if len(input_ids) > 2048:  # Model's maximum sequence length
+                print(f"Sequence too long ({len(input_ids)}), truncating")
+                input_ids = input_ids[:2048]
+            
             inputs_embeds = self.word_embedding(torch.tensor(input_ids).to(self.device))
             inputs_embeds = torch.cat([bos_embeds, graph_embeds[i].unsqueeze(0), inputs_embeds], dim=0)
 
@@ -217,6 +224,10 @@ class GraphLLM(torch.nn.Module):
         inputs_embeds = torch.stack(batch_inputs_embeds, dim=0).to(self.device)
         attention_mask = torch.tensor(batch_attention_mask).to(self.device)
         label_input_ids = torch.tensor(batch_label_input_ids).to(self.device)
+
+        # Clear memory before forward pass
+        if hasattr(torch.cuda, 'empty_cache'):
+            torch.cuda.empty_cache()
 
         with self.maybe_autocast():
             outputs = self.model(

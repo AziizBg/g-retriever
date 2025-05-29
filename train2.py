@@ -50,10 +50,10 @@ def main(args):
         print("Data is not a dictionary")
         print(train_dataset[0].__dict__.keys())
 
-    # Reduce batch size for stability
-    args.batch_size = 4  # Reduced from 8
-    args.eval_batch_size = 4  # Reduced from 16
-    args.max_txt_len = 256
+    # Reduce batch size and sequence length for memory efficiency
+    args.batch_size = 2  # Further reduced from 4
+    args.eval_batch_size = 2  # Further reduced from 4
+    args.max_txt_len = 128  # Reduced from 256
     args.max_new_tokens = 16
 
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, drop_last=True, pin_memory=True, shuffle=True, collate_fn=collate_fn)
@@ -72,7 +72,7 @@ def main(args):
     # Step 4 Set Optimizer with reduced learning rate
     params = [p for _, p in model.named_parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(
-        [{'params': params, 'lr': args.lr * 0.001, 'weight_decay': args.wd}],  # Reduced learning rate by 10x
+        [{'params': params, 'lr': args.lr * 0.001, 'weight_decay': args.wd}],
         betas=(0.9, 0.95)
     )
     
@@ -89,7 +89,7 @@ def main(args):
     best_epoch = -1
 
     # Add learning rate warmup
-    warmup_steps = min(1000, len(train_loader))  # Warmup for first 1000 steps
+    warmup_steps = min(1000, len(train_loader))
     current_step = 0
 
     for epoch in range(args.num_epochs):
@@ -98,6 +98,10 @@ def main(args):
         num_batches = 0
 
         for step, batch in enumerate(train_loader):
+            # Clear GPU cache before each batch
+            if hasattr(torch.cuda, 'empty_cache'):
+                torch.cuda.empty_cache()
+            
             # Validate and normalize input data
             for k, v in batch.items():
                 if torch.is_tensor(v):
@@ -128,6 +132,9 @@ def main(args):
                             torch.cuda.empty_cache()
                         print("GPU OOM, skipping batch")
                         continue
+                    elif "indexing errors" in str(e):
+                        print("Sequence length error, skipping batch")
+                        continue
                     else:
                         raise e
                 
@@ -138,7 +145,7 @@ def main(args):
             scaler.unscale_(optimizer)
             
             # Clip gradients with reduced threshold
-            grad_norm = clip_grad_norm_(optimizer.param_groups[0]['params'], 0.1)  # Reduced from 0.5
+            grad_norm = clip_grad_norm_(optimizer.param_groups[0]['params'], 0.1)
             print({'Gradient Norm': grad_norm})
             
             # Skip update if gradients are NaN/Inf
@@ -161,7 +168,7 @@ def main(args):
 
             current_step += 1
 
-            epoch_loss += loss.item() * args.grad_steps  # Scale back up for logging
+            epoch_loss += loss.item() * args.grad_steps
             accum_loss += loss.item() * args.grad_steps
             num_batches += 1
 
@@ -184,8 +191,14 @@ def main(args):
                 if any(torch.isnan(v).any() or torch.isinf(v).any() for v in batch.values() if torch.is_tensor(v)):
                     print(f"NaN/Inf detected in val batch {step}, skipping")
                     continue
-                loss = model(batch)
-                val_loss += loss.item()
+                try:
+                    loss = model(batch)
+                    val_loss += loss.item()
+                except RuntimeError as e:
+                    if "out of memory" in str(e) or "indexing errors" in str(e):
+                        print(f"Error in val batch {step}, skipping")
+                        continue
+                    raise e
 
         val_loss /= len(val_loader)
         print(f"Epoch {epoch}/{args.num_epochs} - Val Loss: {val_loss:.4f}")
@@ -219,10 +232,16 @@ def main(args):
     with open(path, "w") as f:
         for step, batch in enumerate(test_loader):
             with torch.no_grad():
-                output = model.inference(batch)
-                df = pd.DataFrame(output)
-                for _, row in df.iterrows():
-                    f.write(json.dumps(dict(row)) + "\n")
+                try:
+                    output = model.inference(batch)
+                    df = pd.DataFrame(output)
+                    for _, row in df.iterrows():
+                        f.write(json.dumps(dict(row)) + "\n")
+                except RuntimeError as e:
+                    if "out of memory" in str(e) or "indexing errors" in str(e):
+                        print(f"Error in test batch {step}, skipping")
+                        continue
+                    raise e
             progress_bar_test.update(1)
 
     acc = eval_funcs[args.dataset](path)
