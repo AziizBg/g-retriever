@@ -98,19 +98,38 @@ def main(args):
             if torch.isnan(loss) or torch.isinf(loss):
                 print("NaN/Inf in loss, skipping batch")
                 continue
+                
+            # Add gradient monitoring before backward pass
+            for name, param in model.named_parameters():
+                if param.grad is not None:
+                    if torch.isnan(param.grad).any():
+                        param.grad[torch.isnan(param.grad)] = 0
+                    if torch.isinf(param.grad).any():
+                        param.grad[torch.isinf(param.grad)] = 0
+                        
             loss.backward()
 
-            # Add gradient monitoring
-            grad_norm = clip_grad_norm_(optimizer.param_groups[0]['params'], 1.0)  # Reduced from 0.1
+            # Reduce gradient clipping threshold
+            grad_norm = clip_grad_norm_(optimizer.param_groups[0]['params'], 0.5)  # Reduced from 1.0
             print({'Gradient Norm': grad_norm})
 
+            # Additional gradient cleanup after backward pass
             for name, param in model.named_parameters():
-                if param.grad is not None and torch.isnan(param.grad).any():
-                    # print(f"NaN gradient in {name}")
-                    param.grad[torch.isnan(param.grad)] = 0
+                if param.grad is not None:
+                    if torch.isnan(param.grad).any():
+                        param.grad[torch.isnan(param.grad)] = 0
+                    if torch.isinf(param.grad).any():
+                        param.grad[torch.isinf(param.grad)] = 0
 
             if (step + 1) % args.grad_steps == 0:
-                adjust_learning_rate(optimizer.param_groups[0], args.lr, step / len(train_loader) + epoch, args)
+                # Add learning rate warmup
+                warmup_steps = min(1000, len(train_loader))
+                if step < warmup_steps:
+                    lr_scale = min(1., float(step + 1) / float(warmup_steps))
+                    for pg in optimizer.param_groups:
+                        pg['lr'] = args.lr * lr_scale
+                else:
+                    adjust_learning_rate(optimizer.param_groups[0], args.lr, step / len(train_loader) + epoch, args)
 
             optimizer.step()
             epoch_loss += loss.item()
