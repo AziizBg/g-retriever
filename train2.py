@@ -55,7 +55,7 @@ def main(args):
     args.eval_batch_size = 1  # Further reduced from 2
     args.max_txt_len = 64  # Further reduced from 128
     args.max_new_tokens = 16
-    args.grad_steps = 8  # Increased from 4 for more stable gradients
+    args.grad_steps = 16  # Increased from 8 for more stable gradients
 
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, drop_last=True, pin_memory=True, shuffle=True, collate_fn=collate_fn)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, drop_last=False, pin_memory=True, shuffle=False, collate_fn=collate_fn)
@@ -73,7 +73,7 @@ def main(args):
     # Step 4 Set Optimizer with reduced learning rate
     params = [p for _, p in model.named_parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(
-        [{'params': params, 'lr': args.lr * 0.000001, 'weight_decay': args.wd}],  # Further reduced learning rate
+        [{'params': params, 'lr': args.lr * 0.0000001, 'weight_decay': args.wd}],  # Further reduced learning rate
         betas=(0.9, 0.95)
     )
     
@@ -90,7 +90,7 @@ def main(args):
     best_epoch = -1
 
     # Add learning rate warmup
-    warmup_steps = min(2000, len(train_loader))  # Increased warmup steps
+    warmup_steps = min(4000, len(train_loader))  # Increased warmup steps
     current_step = 0
 
     for epoch in range(args.num_epochs):
@@ -147,7 +147,7 @@ def main(args):
                 scaler.unscale_(optimizer)
                 
                 # Clip gradients with reduced threshold
-                grad_norm = clip_grad_norm_(optimizer.param_groups[0]['params'], 0.01)  # Further reduced from 0.05
+                grad_norm = clip_grad_norm_(optimizer.param_groups[0]['params'], 0.001)  # Further reduced from 0.01
                 print({'Gradient Norm': grad_norm})
                 
                 # Skip update if gradients are NaN/Inf
@@ -163,13 +163,13 @@ def main(args):
 
                 # Learning rate warmup with cosine schedule
                 if current_step < warmup_steps:
-                    lr_scale = 0.1 * (1 + torch.cos(torch.tensor(current_step / warmup_steps * torch.pi)))  # Reduced from 0.5
+                    lr_scale = 0.01 * (1 + torch.cos(torch.tensor(current_step / warmup_steps * torch.pi)))  # Further reduced from 0.1
                     for pg in optimizer.param_groups:
                         pg['lr'] = args.lr * lr_scale
                 else:
                     # Cosine decay after warmup
                     progress = (current_step - warmup_steps) / (num_training_steps - warmup_steps)
-                    lr_scale = 0.1 * (1 + torch.cos(torch.tensor(progress * torch.pi)))  # Reduced from 0.5
+                    lr_scale = 0.01 * (1 + torch.cos(torch.tensor(progress * torch.pi)))  # Further reduced from 0.1
                     for pg in optimizer.param_groups:
                         pg['lr'] = args.lr * lr_scale
 
