@@ -22,11 +22,10 @@ class WebQSPDataset(Dataset):
         self.prompt = 'Please answer the given question.'
         self.graph = None
         self.graph_type = 'Knowledge Graph'
-        # Load dataset with proper caching configuration
+        # Load dataset with proper configuration
         dataset = datasets.load_dataset(
             "rmanluo/RoG-webqsp",
-            cache_dir=None,  # Disable local caching
-            trust_remote_code=True
+            cache_dir=None  # Disable local caching
         )
         self.dataset = datasets.concatenate_datasets([dataset['train'], dataset['validation'], dataset['test']])
         self.q_embs = torch.load(f'{path}/q_embs.pt')
@@ -73,11 +72,10 @@ def preprocess():
     os.makedirs(drive_cached_desc, exist_ok=True)
     os.makedirs(drive_cached_graph, exist_ok=True)
     
-    # Load dataset with proper caching configuration
+    # Load dataset with proper configuration
     dataset = datasets.load_dataset(
         "rmanluo/RoG-webqsp",
-        cache_dir=None,  # Disable local caching
-        trust_remote_code=True
+        cache_dir=None  # Disable local caching
     )
     dataset = datasets.concatenate_datasets([dataset['train'], dataset['validation'], dataset['test']])
 
