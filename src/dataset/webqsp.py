@@ -46,7 +46,6 @@ class WebQSPDataset(Dataset):
         }
 
     def get_idx_split(self):
-
         # Load the saved indices
         with open(f'{path}/split/train_indices.txt', 'r') as file:
             train_indices = [int(line.strip()) for line in file]
@@ -94,8 +93,7 @@ def preprocess():
         open(f'{drive_cached_desc}/{index}.txt', 'w').write(desc)
 
 
-if __name__ == '__main__':
-
+def main():
     preprocess()
 
     dataset = WebQSPDataset()
@@ -107,3 +105,7 @@ if __name__ == '__main__':
     split_ids = dataset.get_idx_split()
     for k, v in split_ids.items():
         print(f'# {k}: {len(v)}')
+
+
+if __name__ == '__main__':
+    main()
