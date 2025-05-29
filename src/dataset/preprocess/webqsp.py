@@ -61,6 +61,19 @@ def step_one():
     os.makedirs(path_edges, exist_ok=True)
 
     for i in tqdm(range(len(dataset))):
+        # Check if files already exist in drive folder
+        drive_nodes_path = f'/content/drive/MyDrive/{path_nodes}/{i}.csv'
+        drive_edges_path = f'/content/drive/MyDrive/{path_edges}/{i}.csv'
+        
+        if os.path.exists(drive_nodes_path) and os.path.exists(drive_edges_path):
+            # Copy files from drive to local if they exist
+            os.makedirs(os.path.dirname(f'{path_nodes}/{i}.csv'), exist_ok=True)
+            os.makedirs(os.path.dirname(f'{path_edges}/{i}.csv'), exist_ok=True)
+            import shutil
+            shutil.copy2(drive_nodes_path, f'{path_nodes}/{i}.csv')
+            shutil.copy2(drive_edges_path, f'{path_edges}/{i}.csv')
+            continue
+
         nodes = {}
         edges = []
         for tri in dataset[i]['graph']:
@@ -75,8 +88,15 @@ def step_one():
         nodes = pd.DataFrame([{'node_id': v, 'node_attr': k} for k, v in nodes.items()], columns=['node_id', 'node_attr'])
         edges = pd.DataFrame(edges, columns=['src', 'edge_attr', 'dst'])
 
+        # Save to local directory
         nodes.to_csv(f'{path_nodes}/{i}.csv', index=False)
         edges.to_csv(f'{path_edges}/{i}.csv', index=False)
+        
+        # Save to drive
+        os.makedirs(os.path.dirname(drive_nodes_path), exist_ok=True)
+        os.makedirs(os.path.dirname(drive_edges_path), exist_ok=True)
+        nodes.to_csv(drive_nodes_path, index=False)
+        edges.to_csv(drive_edges_path, index=False)
 
 def generate_split():
     """
@@ -131,28 +151,51 @@ def step_two():
 
     questions = [i['question'] for i in dataset]
 
-    # Initialize model
-    model, tokenizer, device = load_model[model_name]()
-    model = model.half().to(device)
-    model.eval()
-    text2embedding = load_text2embedding[model_name]
+    # Check if question embeddings already exist in drive
+    drive_q_embs_path = f'/content/drive/MyDrive/{path}/q_embs.pt'
+    if os.path.exists(drive_q_embs_path):
+        print('Loading existing question embeddings from drive...')
+        import shutil
+        os.makedirs(os.path.dirname(f'{path}/q_embs.pt'), exist_ok=True)
+        shutil.copy2(drive_q_embs_path, f'{path}/q_embs.pt')
+        q_embs = torch.load(f'{path}/q_embs.pt')
+    else:
+        # Initialize model
+        model, tokenizer, device = load_model[model_name]()
+        model = model.half().to(device)
+        model.eval()
+        text2embedding = load_text2embedding[model_name]
 
-    print('Encoding questions...')
-    q_embs = []
-    batch_size = 64
-    for i in tqdm(range(0, len(questions), batch_size)):
-        batch = questions[i:i+batch_size]
-        with torch.no_grad(), torch.cuda.amp.autocast():
-            q_embs.append(text2embedding(model, tokenizer, device, batch))
-    q_embs = torch.cat(q_embs)
-    torch.save(q_embs, f'{path}/q_embs.pt')
+        print('Encoding questions...')
+        q_embs = []
+        batch_size = 64
+        for i in tqdm(range(0, len(questions), batch_size)):
+            batch = questions[i:i+batch_size]
+            with torch.no_grad(), torch.cuda.amp.autocast():
+                q_embs.append(text2embedding(model, tokenizer, device, batch))
+        q_embs = torch.cat(q_embs)
+        torch.save(q_embs, f'{path}/q_embs.pt')
+        
+        # Save to drive
+        os.makedirs(os.path.dirname(drive_q_embs_path), exist_ok=True)
+        torch.save(q_embs, drive_q_embs_path)
 
     print(f'Encoding graphs (processing {SAMPLE_SIZE} of {total_graphs})...')
     os.makedirs(path_graphs, exist_ok=True)
+    os.makedirs(f'/content/drive/MyDrive/{path_graphs}', exist_ok=True)
 
     progress_bar = tqdm(total=SAMPLE_SIZE)
     for index in range(SAMPLE_SIZE):
         try:
+            # Check if graph already exists in drive
+            drive_graph_path = f'/content/drive/MyDrive/{path_graphs}/{index}.pt'
+            if os.path.exists(drive_graph_path):
+                # Copy from drive to local
+                shutil.copy2(drive_graph_path, f'{path_graphs}/{index}.pt')
+                processed += 1
+                progress_bar.update(1)
+                continue
+
             nodes = pd.read_csv(f'{path_nodes}/{index}.csv')
             edges = pd.read_csv(f'{path_edges}/{index}.csv')
             nodes.node_attr = nodes.node_attr.fillna("")
@@ -171,7 +214,12 @@ def step_two():
             
             edge_index = torch.LongTensor([edges.src.tolist(), edges.dst.tolist()])
             pyg_graph = Data(x=x, edge_index=edge_index, edge_attr=edge_attr, num_nodes=len(nodes))
+            
+            # Save to local directory
             torch.save(pyg_graph, f'{path_graphs}/{index}.pt')
+            
+            # Save to drive
+            torch.save(pyg_graph, drive_graph_path)
             
             processed += 1
             progress_bar.set_postfix({'processed': processed, 'skipped': skipped})
