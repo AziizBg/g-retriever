@@ -62,8 +62,8 @@ def step_one():
 
     for i in tqdm(range(len(dataset))):
         # Check if files already exist in drive folder
-        drive_nodes_path = f'/content/drive/MyDrive/{path_nodes}/{i}.csv'
-        drive_edges_path = f'/content/drive/MyDrive/{path_edges}/{i}.csv'
+        drive_nodes_path = f'/content/drive/MyDrive/Projets TPs GL4/PFA GL4/webqsp/dataset/webqsp/{path_nodes}/{i}.csv'
+        drive_edges_path = f'/content/drive/MyDrive/Projets TPs GL4/PFA GL4/webqsp/dataset/webqsp/{path_edges}/{i}.csv'
         
         if os.path.exists(drive_nodes_path) and os.path.exists(drive_edges_path):
             # Copy files from drive to local if they exist
@@ -152,7 +152,7 @@ def step_two():
     questions = [i['question'] for i in dataset]
 
     # Check if question embeddings already exist in drive
-    drive_q_embs_path = f'/content/drive/MyDrive/{path}/q_embs.pt'
+    drive_q_embs_path = f'/content/drive/MyDrive/Projets TPs GL4/PFA GL4/webqsp/dataset/webqsp/{path}/q_embs.pt'
     if os.path.exists(drive_q_embs_path):
         print('Loading existing question embeddings from drive...')
         import shutil
@@ -182,7 +182,7 @@ def step_two():
 
     print(f'Encoding graphs (processing {SAMPLE_SIZE} of {total_graphs})...')
     os.makedirs(path_graphs, exist_ok=True)
-    os.makedirs(f'/content/drive/MyDrive/{path_graphs}', exist_ok=True)
+    os.makedirs(f'/content/drive/MyDrive/Projets TPs GL4/PFA GL4/webqsp/dataset/webqsp/{path_graphs}', exist_ok=True)
 
     progress_bar = tqdm(total=SAMPLE_SIZE)
     for index in range(SAMPLE_SIZE):

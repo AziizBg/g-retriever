@@ -59,14 +59,23 @@ class WebQSPDataset(Dataset):
 
 
 def preprocess():
+    # Check if files exist in Google Drive
+    drive_cached_desc = f'/content/drive/MyDrive/Projets TPs GL4/PFA GL4/webqsp/dataset/webqsp/{cached_desc}'
+    drive_cached_graph = f'/content/drive/MyDrive/Projets TPs GL4/PFA GL4/webqsp/dataset/webqsp/{cached_graph}'
+    
+    # Create directories if they don't exist
     os.makedirs(cached_desc, exist_ok=True)
     os.makedirs(cached_graph, exist_ok=True)
+    os.makedirs(drive_cached_desc, exist_ok=True)
+    os.makedirs(drive_cached_graph, exist_ok=True)
+    
     dataset = datasets.load_dataset("rmanluo/RoG-webqsp")
     dataset = datasets.concatenate_datasets([dataset['train'], dataset['validation'], dataset['test']])
 
     q_embs = torch.load(f'{path}/q_embs.pt')
     for index in tqdm(range(len(dataset))):
-        if os.path.exists(f'{cached_graph}/{index}.pt'):
+        # Check both local and drive paths
+        if os.path.exists(f'{cached_graph}/{index}.pt') or os.path.exists(f'{drive_cached_graph}/{index}.pt'):
             continue
 
         nodes = pd.read_csv(f'{path_nodes}/{index}.csv')
@@ -77,8 +86,12 @@ def preprocess():
         graph = torch.load(f'{path_graphs}/{index}.pt')
         q_emb = q_embs[index]
         subg, desc = retrieval_via_pcst(graph, q_emb, nodes, edges, topk=3, topk_e=5, cost_e=0.5)
+        
+        # Save to both local and drive paths
         torch.save(subg, f'{cached_graph}/{index}.pt')
+        torch.save(subg, f'{drive_cached_graph}/{index}.pt')
         open(f'{cached_desc}/{index}.txt', 'w').write(desc)
+        open(f'{drive_cached_desc}/{index}.txt', 'w').write(desc)
 
 
 if __name__ == '__main__':
