@@ -86,17 +86,21 @@ class GraphLLM(torch.nn.Module):
             nn.LayerNorm(2048),
             nn.Dropout(0.1),
             nn.GELU(),
+            nn.Linear(2048, 2048),
+            nn.LayerNorm(2048),
+            nn.Dropout(0.1),
+            nn.GELU(),
             nn.Linear(2048, llm_embed_dim),
             nn.LayerNorm(llm_embed_dim)
         ).to(self.model.device)
 
         for layer in self.projector:
             if isinstance(layer, nn.Linear):
-                nn.init.kaiming_normal_(layer.weight, mode='fan_in', nonlinearity='relu')
+                nn.init.xavier_uniform_(layer.weight, gain=0.01)
                 nn.init.zeros_(layer.bias)
 
         for p in self.projector.parameters():
-            p.register_hook(lambda grad: torch.nan_to_num(grad, nan=0.0, posinf=1e4, neginf=-1e4))
+            p.register_hook(lambda grad: torch.clamp(grad, -1.0, 1.0))
 
     @property
     def device(self):

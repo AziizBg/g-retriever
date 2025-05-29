@@ -38,26 +38,41 @@ class GraphTransformer(torch.nn.Module):
         self.convs = torch.nn.ModuleList()
         self.convs.append(TransformerConv(in_channels=in_channels, out_channels=hidden_channels//num_heads, heads=num_heads, edge_dim=in_channels, dropout=dropout))
         self.bns = torch.nn.ModuleList()
-        self.bns.append(torch.nn.BatchNorm1d(hidden_channels))
+        self.bns.append(torch.nn.LayerNorm(hidden_channels))
         for _ in range(num_layers - 2):
             self.convs.append(TransformerConv(in_channels=hidden_channels, out_channels=hidden_channels//num_heads, heads=num_heads, edge_dim=in_channels, dropout=dropout,))
-            self.bns.append(torch.nn.BatchNorm1d(hidden_channels))
+            self.bns.append(torch.nn.LayerNorm(hidden_channels))
         self.convs.append(TransformerConv(in_channels=hidden_channels, out_channels=out_channels//num_heads, heads=num_heads, edge_dim=in_channels, dropout=dropout,))
         self.dropout = dropout
+        
+        self.input_norm = torch.nn.LayerNorm(in_channels)
+        self.edge_norm = torch.nn.LayerNorm(in_channels)
 
     def reset_parameters(self):
         for conv in self.convs:
             conv.reset_parameters()
         for bn in self.bns:
             bn.reset_parameters()
+        self.input_norm.reset_parameters()
+        self.edge_norm.reset_parameters()
 
     def forward(self, x, adj_t, edge_attr):
+        x = self.input_norm(x)
+        edge_attr = self.edge_norm(edge_attr)
+        
         for i, conv in enumerate(self.convs[:-1]):
             x = conv(x, edge_index=adj_t, edge_attr=edge_attr)
             x = self.bns[i](x)
             x = F.relu(x)
             x = F.dropout(x, p=self.dropout, training=self.training)
+            if i > 0:
+                x = x + self.convs[i-1](x, edge_index=adj_t, edge_attr=edge_attr)
+        
         x = self.convs[-1](x, edge_index=adj_t, edge_attr=edge_attr)
+        
+        x = F.normalize(x, p=2, dim=-1)
+        edge_attr = F.normalize(edge_attr, p=2, dim=-1)
+        
         return x, edge_attr
 
 class GAT(torch.nn.Module):
